@@ -89,6 +89,11 @@ public final class Machine {
     public var trapInfo = ""
     public var mmuOn = false
     var sysregs: [String: UInt64] = [:]
+    /// CNTV deadline (stage-5 frontier 20): the absolute tick at which the
+    /// virtual timer fires, set by CNTV_TVAL/CVAL writes; nil until the
+    /// kernel first programs it. Stored as the raw 64-bit pattern of the
+    /// signed BigInt the reference keeps.
+    var cntvDeadline: UInt64? = nil
     var uartRxQueue: [UInt8] = []
     var tlb: [UInt64: UInt64] = [:]
     /// Insertion-ordered like the reference's Map (the backdoor prints it in order).
@@ -423,7 +428,8 @@ public final class Machine {
         sysregs[sysKey(3, 0, 6, 0, 0)] = rec.undef ? 0 : rec.va             // FAR_EL1
         sysregs[sysKey(3, 0, 4, 0, 1)] = rec.elr                            // ELR_EL1
         let nzcv = (UInt64(nFlag) << 31) | (UInt64(zFlag) << 30) | (UInt64(cFlag) << 29) | (UInt64(vFlag) << 28)
-        sysregs[sysKey(3, 0, 4, 0, 0)] = nzcv | (0b1111 << 6) | 0b0101      // SPSR_EL1
+        let panBit = ((sysregs[sysKey(3, 0, 4, 2, 3)] ?? 0) & 1) << 22   // SPSR_EL1.PAN = current PAN (stage-5 frontier 18)
+        sysregs[sysKey(3, 0, 4, 0, 0)] = nzcv | panBit | (0b1111 << 6) | 0b0101      // SPSR_EL1: NZCV+PAN saved, DAIF masked, EL1h
         pc = vbar &+ 0x200   // sync exception from EL1 using SP_EL1
         exceptions += 1
         lastException = (rec.undef ? "undefined instruction"
