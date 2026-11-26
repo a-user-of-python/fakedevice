@@ -226,12 +226,22 @@ public func buildADT(_ pack: TranslatorPack) -> [UInt8] {
         adtProp("#address-cells", adtU32(pack.cpus.addressCells)),
         adtProp("#size-cells", adtU32(pack.cpus.sizeCells)),
     ], pack.cpus.list.map(cpuNode))
+    // /defaults: real iBoot trees carry a "defaults" node; this kernel
+    // version does not consume it, but it belongs in a faithful tree.
+    // Its "serial-device" property carries the console UART's
+    // AAPL,phandle. The serial console itself is enabled by the
+    // debug=0xa boot-arg (DB_PRT|DB_KPRT) and by the uart0 node's name
+    // + "uart-1,samsung" compatible, which the kernel's PE serial init
+    // matches by string (stage-5 frontier 22).
+    let defaults = adtNode(pack.defaults.name, [
+        adtProp("serial-device", adtU32(pack.uart.phandle)),
+    ], [])
     let root = adtNode(pack.deviceTree.rootName, [
         adtProp("compatible", adtStr(pack.deviceTree.rootCompatible)),
         adtProp("model", adtStr(pack.deviceTree.model)),
         adtProp("#address-cells", adtU32(pack.deviceTree.rootAddressCells)),
         adtProp("#size-cells", adtU32(pack.deviceTree.rootSizeCells)),
-    ], [chosen, memory, cpus, armIo])
+    ], [chosen, memory, cpus, armIo, defaults])
     return root
 }
 
