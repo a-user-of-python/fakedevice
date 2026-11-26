@@ -127,6 +127,31 @@ public func buildADT(_ pack: TranslatorPack) -> [UInt8] {
         adtProp("compatible", adtStr(pack.uart.compatible)),
         adtProp("reg", adtReg(uartRegOffset, pack.uartSize)),
         adtProp("interrupts", pack.uart.interrupts.flatMap { adtU32($0) }),
+        adtProp("AAPL,phandle", adtU32(pack.uart.phandle)),
+    ], [])
+    // The interrupt controller (stage-5 frontier 21): a real t8030 tree
+    // has an AIC under arm-io. Without it, PE's
+    // pe_arm_map_interrupt_controller fails (it looks up a node whose
+    // "interrupt-controller" property reads "master"), the
+    // AppleInterruptController driver can never start, and IOKit's DT
+    // interrupt resolution can never succeed. "reg" is an offset within
+    // arm-io, like every child device here.
+    let aic = adtNode(pack.aic.name, [
+        adtProp("compatible", adtStr(pack.aic.compatible)),
+        adtProp("device_type", adtStr(pack.aic.deviceType)),
+        adtProp("reg", adtReg(TranslatorPack.hex(pack.aic.regOffset), TranslatorPack.hex(pack.aic.regSize))),
+        adtProp("interrupt-controller", adtStr(pack.aic.interruptControllerValue)),
+        adtProp("#interrupt-cells", adtU32(pack.aic.interruptCells)),
+        adtProp("aic-version", adtU32(pack.aic.aicVersion)),
+        adtProp("AAPL,phandle", adtU32(pack.aic.phandle)),
+    ], [])
+    // PE also maps a "timer" device (device_type "timer") in the same
+    // lookup; a real tree carries one under arm-io.
+    let timer = adtNode(pack.timer.name, [
+        adtProp("compatible", adtStr(pack.timer.compatible)),
+        adtProp("device_type", adtStr(pack.timer.deviceType)),
+        adtProp("reg", adtReg(TranslatorPack.hex(pack.timer.regOffset), TranslatorPack.hex(pack.timer.regSize))),
+        adtProp("AAPL,phandle", adtU32(pack.timer.phandle)),
     ], [])
     let armIoProps: [[UInt8]] = [
         adtProp("compatible", adtStr(pack.armIo.compatible)),
@@ -135,8 +160,13 @@ public func buildADT(_ pack: TranslatorPack) -> [UInt8] {
         adtProp("#size-cells", adtU32(pack.armIo.sizeCells)),
         adtProp("reg", adtReg(TranslatorPack.hex(pack.armIo.regAddress), TranslatorPack.hex(pack.armIo.regSize))),
         adtProp("ranges", adtRanges(pack.armIo.ranges)),
+        adtProp("AAPL,phandle", adtU32(pack.armIo.phandle)),
+        // Devices under arm-io resolve their interrupts through the AIC:
+        // IODTFindInterruptParent follows this phandle (the target
+        // carries #interrupt-cells + AAPL,phandle — the aic node does).
+        adtProp("interrupt-parent", adtU32(pack.armIo.interruptParent)),
     ]
-    let armIo = adtNode(pack.armIo.name, armIoProps, [uart0])
+    let armIo = adtNode(pack.armIo.name, armIoProps, [uart0, aic, timer])
     // /chosen/lock-regs: real iBoot describes the hardware lock apertures
     // here; the kernel's lock-regs init panics if the node, its "amcc"
     // child, or the amcc property set is missing (stage-5 frontier 14).
