@@ -127,6 +127,7 @@ public func buildADT(_ pack: TranslatorPack) -> [UInt8] {
         adtProp("compatible", adtStr(pack.uart.compatible)),
         adtProp("reg", adtReg(uartRegOffset, pack.uartSize)),
         adtProp("interrupts", pack.uart.interrupts.flatMap { adtU32($0) }),
+        adtProp("interrupt-parent", adtU32(pack.uart.interruptParent)),
         adtProp("AAPL,phandle", adtU32(pack.uart.phandle)),
     ], [])
     // The interrupt controller (stage-5 frontier 21): a real t8030 tree
