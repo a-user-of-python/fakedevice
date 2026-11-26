@@ -1,9 +1,22 @@
 {
+  "aic": {
+    "aicVersion": 1,
+    "compatible": "aic,1",
+    "deviceType": "aic",
+    "interruptCells": 3,
+    "interruptControllerValue": "master",
+    "name": "aic",
+    "phandle": 4,
+    "regOffset": "0x3B100000",
+    "regSize": "0x8000"
+  },
   "armIo": {
     "addressCells": 2,
     "compatible": "arm-io,t8030",
     "deviceType": "arm-io",
+    "interruptParent": 4,
     "name": "arm-io",
+    "phandle": 2,
     "ranges": [
       {
         "childAddress": "0x0",
@@ -121,6 +134,14 @@
   "packVersion": 1,
   "soc": "t8030",
   "socName": "Apple A13 Bionic",
+  "timer": {
+    "compatible": "timer,arm",
+    "deviceType": "timer",
+    "name": "timer",
+    "phandle": 5,
+    "regOffset": "0x3B200000",
+    "regSize": "0x8000"
+  },
   "uart": {
     "base": "0x235200000",
     "compatible": "samsung,uart",
@@ -130,6 +151,7 @@
       0
     ],
     "name": "uart0",
+    "phandle": 3,
     "registers": {
       "urxh": "0x24",
       "utrstat": "0x10",
