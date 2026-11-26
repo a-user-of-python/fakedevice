@@ -49,3 +49,23 @@ target (`SUPPORTED_PLATFORMS = iphoneos iphonesimulator macosx`):
 `CorePendingPlaceholder()`; the real core is `FakeDeviceCoreMachine()`,
 which conforms to the same `EmulatorCore` protocol, so the swap is one
 line and the views never change.
+
+## macOS x86_64 (Intel) notes
+
+- The Intel lane's CI is `.github/workflows/build-macos-intel.yml`: the
+  app is built for x86_64 **natively** on `macos-26-intel` (a standard
+  GitHub-hosted runner — 4-core Intel, free on public repos; the larger
+  Intel label `macos-26-large` is paid and never used), and a second job
+  on `macos-26` builds the universal binary and proves with `lipo` that
+  it contains both `arm64` and `x86_64` slices. A third job runs the
+  core's `fakedevice-check` harness natively on Intel once the
+  FakeDeviceCore package lands.
+- The project target sets `ARCHS = "$(ARCHS_STANDARD)"` explicitly, so a
+  plain Release build for macOS is universal (arm64 + x86_64); the
+  iphoneos SDK still resolves the same setting to arm64 only.
+- Performance on Intel: the core is compiled Swift on both
+  architectures — there is no JavaScript/JIT layer in the native apps at
+  all, so the x86_64 build runs the interpreter as native compiled code,
+  with the full app memory headroom a browser tab never gets. The
+  interpreter's speed characteristics (a straightforward instruction
+  interpreter) are otherwise the same on both architectures.
