@@ -1,0 +1,13 @@
+import { readFileSync, writeFileSync } from 'fs';
+const emu = readFileSync('./emu.js', 'utf8');
+const boot = readFileSync('./boot.js', 'utf8');
+const kc = readFileSync('../kernelcache/kernelcache.raw');
+let tpl = readFileSync('./page4_template.html', 'utf8');
+if (emu.includes('</script') || boot.includes('</script')) throw new Error('script body contains </script');
+const b64 = kc.toString('base64');
+const chunks = [];
+for (let i = 0; i < b64.length; i += 4000000) chunks.push(JSON.stringify(b64.slice(i, i + 4000000)));
+tpl = tpl.replace('/*__KERNEL_B64__*/', () => '[\n' + chunks.join(',\n') + '\n]');
+tpl = tpl.replace('/*__EMU_JS__*/', () => emu).replace('/*__BOOT_JS__*/', () => boot);
+writeFileSync('../../your_files/FakeDevice-XNU-stage4.html', tpl);
+console.log('stage-4 page written:', tpl.length, 'bytes (kernel', kc.length, 'bytes embedded as', b64.length, 'base64 chars)');

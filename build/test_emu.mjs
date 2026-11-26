@@ -1,0 +1,14 @@
+import { readFileSync } from 'fs';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { createMachine, DRAM_BASE } = require('./emu.js');
+let out = '';
+const m = createMachine(b => { out += String.fromCharCode(b); }, s => console.log('[log]', s));
+const bin = readFileSync('./test.bin');
+m.loadBytes(DRAM_BASE, bin);
+m.pc = DRAM_BASE;
+m.sp = DRAM_BASE + 0x100000n;
+const st = m.run(100000);
+console.log('status:', st, '| trap:', m.trapInfo, '| instructions:', m.icount);
+console.log('UART output:', JSON.stringify(out));
+console.log(out === 'test\n55\n' ? 'EMULATOR TEST PASS' : 'EMULATOR TEST FAIL');

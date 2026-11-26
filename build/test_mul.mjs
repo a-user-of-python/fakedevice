@@ -1,0 +1,28 @@
+import { readFileSync } from 'fs';
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { createMachine } = require('./emu.js');
+const bin = new Uint8Array(readFileSync('/tmp/test_mul.bin'));
+const m = createMachine(() => {}, () => {});
+m.loadBytes(0x800010000n, bin);
+m.pc = 0x800010000n;
+m.run(100000);
+let pass = 0, fail = 0;
+function chk(name, got, want) { if (got === want) pass++; else { fail++; console.log('FAIL:', name, 'got', String(got), 'want', String(want)); } }
+chk('status wfi', m.status, 'wfi');
+chk('smull', m.regs[10], 0xFFFFFFFFFFFFFFEBn);
+chk('smaddl', m.regs[11], 79n);
+chk('smsubl', m.regs[12], 121n);
+chk('smulh pos', m.regs[13], 1n);
+chk('smulh neg', m.regs[14], 0xFFFFFFFFFFFFFFFFn);
+chk('umull', m.regs[15], 0xFFFFFFFE00000001n);
+chk('umaddl', m.regs[16], 0xFFFFFFFE00000006n);
+chk('umsubl', m.regs[17], 0xFFFFFFFFFFFFFFFEn);
+chk('umulh', m.regs[18], 0xFFFFFFFFFFFFFFFEn);
+chk('x5 sentinel (ldr literal did not touch GPR)', m.regs[5], 0x777n);
+const R = 0x800020000;
+const bytesAt = (a, n) => Array.from({length: n}, (_, i) => Number(m.readPhys(BigInt(a + i), 1)));
+chk('ldr q literal bytes', JSON.stringify(bytesAt(R, 16)), JSON.stringify(Array.from({length: 16}, (_, i) => i)));
+chk('ldr d literal bytes', JSON.stringify(bytesAt(R + 16, 8)), JSON.stringify([0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11]));
+chk('ldr s literal bytes', JSON.stringify(bytesAt(R + 24, 4)), JSON.stringify([0xbe, 0xba, 0xfe, 0xca]));
+console.log('MUL/LITERAL test:', pass, 'passed,', fail, 'failed');

@@ -1,0 +1,12 @@
+# The kernel binary is Apple's and is never committed (see kernelcache/PROVENANCE.md)
+kernelcache/*.raw
+kernelcache/*.im4p
+*.ipsw
+
+# JavaScript / tooling
+node_modules/
+
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/

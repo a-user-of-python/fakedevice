@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FakeDevice — XNU in a Chrome tab (stage 3)</title>
+<style>
+  body { background:#101216; color:#e8eaf0; font-family:-apple-system, system-ui, sans-serif; margin:0; padding:16px; line-height:1.45; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:17px; margin:22px 0 6px; }
+  p { max-width:70ch; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:12px 0; }
+  button { background:#2b6cb0; color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:16px; cursor:pointer; }
+  button.secondary { background:#3a4152; }
+  button:active { filter:brightness(1.2); }
+  input[type=file] { font-size:15px; }
+  pre { background:#05070a; border:1px solid #2a2f3a; border-radius:8px; padding:10px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace, Menlo, monospace; font-size:13px; }
+  #uart { min-height:90px; color:#9fe8a9; }
+  #status { color:#ffd479; }
+  #bdout { min-height:140px; max-height:320px; color:#c9d6ff; }
+  #bdin { flex:1; min-width:220px; background:#05070a; color:#fff; border:1px solid #2a2f3a; border-radius:8px; padding:10px; font-family:ui-monospace, Menlo, monospace; font-size:15px; }
+  code { background:#1b1f27; padding:1px 5px; border-radius:4px; }
+  .small { color:#a7b0c0; font-size:14px; }
+</style>
+</head>
+<body>
+<h1>FakeDevice — stage 3</h1>
+<p>A lightweight fake iPhone (t8030) that runs the <b>real iOS kernel</b> — the actual
+<code>kernelcache</code> file, not converted, not recompiled — interpreted instruction by
+instruction right here in this tab.</p>
+<p><b>Stage 3:</b> the fake phone got a lot more real. The kernel now loads at its correct
+physical base — stage 2 had it 16&nbsp;MB off, and that turned out to be the true cause of the
+stage-2 stop. The fake CPU now understands the kernel's vector (NEON) instructions,
+pointer-authenticated branches, and long multiplies, and the device tree describes the
+<code>arm-io</code> block and all six A13 CPU cores the way the kernel expects. The emulator
+also runs about 1.7&times; faster. The kernel boots through its MMU switch, parses the device
+tree, works out its CPU topology, and runs about <b>8.63 million instructions</b> — roughly
+330&times; further than stage 2 — before it stops on a data access to an address its own page
+tables don't map yet, deep in early subsystem setup. Its serial console still isn't awake
+that early, so the serial pane stays empty for the kernel — expected at this stage. Next up:
+exception delivery, so a kernel fault lands in the kernel's own fault handler (and its panic
+output reaches the serial pane) instead of a silent stop.</p>
+<p><b>The backdoor</b> (below) is open access straight into the fake phone: inspect or change
+any memory or register, set breakpoints, single-step, patch instructions on the fly, or type
+into its serial port. The same machine is also exposed to this tab's JavaScript console as
+<code>window.fakedevice</code>.</p>
+
+<h2>Run it</h2>
+<div class="row">
+  <button id="selftest">Run the self-test</button>
+  <span class="small">Built-in tiny ARM64 program — proves the fake CPU works. No file needed.</span>
+</div>
+<div class="row">
+  <input type="file" id="kfile">
+  <button id="boot">Boot the kernel</button>
+  <button id="pause" class="secondary">Pause</button>
+</div>
+<p class="small">For “Boot the kernel”, pick the <code>kernelcache.raw</code> file (46.7&nbsp;MB,
+iOS 14.8, iPhone 11). It never leaves your device — the page reads it locally.</p>
+
+<h2>Serial output (the fake phone's UART)</h2>
+<pre id="uart"></pre>
+<h2>Status</h2>
+<pre id="status">No machine yet. Run the self-test or boot the kernel.</pre>
+<h2>Machine log</h2>
+<pre id="log"></pre>
+
+<h2>Backdoor console</h2>
+<pre id="bdout">Backdoor ready. Type "help" and press Enter.
+All numbers are hex. peek/poke go through the kernel's page tables (what the
+kernel sees); peekp/pokep touch raw physical memory.</pre>
+<div class="row">
+  <input id="bdin" type="text" placeholder="help" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button id="bdrun">Run command</button>
+</div>
+<p class="small">Commands: <code>help</code> · <code>status</code> · <code>regs</code> ·
+<code>sysregs</code> · <code>peek &lt;addr&gt; [len]</code> · <code>peekp &lt;addr&gt; [len]</code> ·
+<code>poke &lt;addr&gt; &lt;hexbytes&gt;</code> · <code>pokep &lt;addr&gt; &lt;hexbytes&gt;</code> ·
+<code>setreg &lt;x0..x30|sp|pc&gt; &lt;value&gt;</code> · <code>bp &lt;addr&gt;</code> ·
+<code>bplist</code> · <code>bpclear</code> · <code>step [n]</code> · <code>run [n]</code> ·
+<code>patch &lt;addr&gt; &lt;instruction-word&gt;</code> · <code>mmio</code> ·
+<code>uartin &lt;text&gt;</code> · <code>lastpc</code></p>
+
+<script>
+/*__EMU_JS__*/
+/*__BOOT_JS__*/
+
+var TEST_B64 = "AKSm0kAAwPKhAgAQIhRAOGIAADQCIAC5/f//FwMAgNIkAIDSYwAEi4QEAJGfLADxq///VEUBgNJmCMWax4wFm8bAABEGIAC558AAEQcgALlCAYBSAiAAuQAAQNR0ZXN0CgA=";
+var machine = null;
+var running = false;
+var uartEl = document.getElementById('uart');
+var logEl = document.getElementById('log');
+var bdEl = document.getElementById('bdout');
+
+function bd(s) { bdEl.textContent += s + "\n"; bdEl.scrollTop = bdEl.scrollHeight; }
+function hex(v) { return "0x" + v.toString(16); }
+function newMachine() {
+  machine = createMachine(function (b) { uartEl.textContent += String.fromCharCode(b); },
+                          function (s) { logEl.textContent += "[emu] " + s + "\n"; });
+  window.fakedevice = machine;
+  return machine;
+}
+function updateStatus() {
+  if (!machine) return;
+  var s = "status: " + machine.status + " | instructions: " + machine.icount.toLocaleString("en-US") +
+          " | MMU: " + (machine.mmuOn ? "ON" : "off") + " | PC: " + hex(machine.pc) + " | SP: " + hex(machine.sp);
+  if (machine.trapInfo) s += "\nstop reason: " + machine.trapInfo;
+  document.getElementById('status').textContent = s;
+}
+function runChunks() {
+  if (!machine) return;
+  running = true;
+  var tick = function () {
+    if (!running) { updateStatus(); return; }
+    machine.run(2000000);
+    updateStatus();
+    if (machine.status === "ready") setTimeout(tick, 0);
+    else { running = false; bd("machine stopped: " + machine.status + (machine.trapInfo ? " — " + machine.trapInfo : "")); }
+  };
+  tick();
+}
+function b64ToBytes(b64) {
+  var bin = atob(b64), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+document.getElementById('selftest').addEventListener('click', function () {
+  newMachine();
+  uartEl.textContent = ""; logEl.textContent = "";
+  machine.loadBytes(DRAM_BASE, b64ToBytes(TEST_B64));
+  machine.pc = DRAM_BASE;
+  bd("self-test loaded at " + hex(DRAM_BASE) + " — running.");
+  runChunks();
+});
+
+document.getElementById('boot').addEventListener('click', function () {
+  var f = document.getElementById('kfile').files[0];
+  if (!f) { bd("Pick the kernel file first (kernelcache.raw)."); return; }
+  f.arrayBuffer().then(function (ab) {
+    newMachine();
+    uartEl.textContent = ""; logEl.textContent = "";
+    try {
+      bootKernel(machine, new Uint8Array(ab), function (s) { logEl.textContent += "[boot] " + s + "\n"; });
+    } catch (e) { bd("boot setup failed: " + e.message); return; }
+    bd("kernel loaded and started — running.");
+    runChunks();
+  });
+});
+
+document.getElementById('pause').addEventListener('click', function () {
+  running = false;
+  updateStatus();
+  bd("paused. Use step/run here, or press Boot/self-test to start over.");
+});
+
+// ---------------- backdoor ----------------
+function parseNum(s) {
+  s = String(s).trim();
+  if (s.toLowerCase().indexOf("0x") === 0) s = s.slice(2);
+  return BigInt("0x" + s);
+}
+function hexDump(addr, bytes) {
+  var lines = [];
+  for (var i = 0; i < bytes.length; i += 16) {
+    var h = "", a = "";
+    for (var j = i; j < Math.min(i + 16, bytes.length); j++) {
+      var b = bytes[j];
+      h += ("0" + b.toString(16)).slice(-2) + " ";
+      a += (b >= 32 && b < 127) ? String.fromCharCode(b) : ".";
+    }
+    while (h.length < 48) h += " ";
+    lines.push(hex(addr + BigInt(i)) + "  " + h + " " + a);
+  }
+  return lines.join("\n");
+}
+function parseBytes(s) {
+  s = s.replace(/[^0-9a-fA-F]/g, "");
+  var out = [];
+  for (var i = 0; i + 1 < s.length + 1 && i + 2 <= s.length; i += 2) out.push(parseInt(s.substr(i, 2), 16));
+  return out;
+}
+function needMachine() { if (!machine) { bd("No machine yet — run the self-test or boot the kernel first."); return false; } return true; }
+
+function bdCommand(raw) {
+  var line = raw.trim();
+  if (!line) return;
+  bd("> " + line);
+  var parts = line.split(/\s+/);
+  var cmd = parts[0].toLowerCase();
+  try {
+    if (cmd === "help") {
+      bd("regs | sysregs | status | lastpc | mmio\n" +
+         "peek <addr> [len] — memory through the page tables (kernel's view)\n" +
+         "peekp <addr> [len] — raw physical memory\n" +
+         "poke <addr> <hexbytes> | pokep <addr> <hexbytes>\n" +
+         "setreg <x0..x30|sp|pc> <value>\n" +
+         "bp <addr> | bplist | bpclear — breakpoints\n" +
+         "step [n] | run [n] — execute (run default 1,000,000, cap 20,000,000)\n" +
+         "patch <addr> <word> — overwrite one 4-byte instruction (hex, e.g. d503201f = nop)\n" +
+         "uartin <text> — type text into the fake phone's serial port");
+      return;
+    }
+    if (!needMachine()) return;
+    if (cmd === "status") { updateStatus(); bd(document.getElementById('status').textContent); }
+    else if (cmd === "regs") {
+      var out = [];
+      for (var i = 0; i <= 30; i++) out.push("X" + i + " = " + hex(machine.regs[i]));
+      out.push("SP = " + hex(machine.sp) + " | PC = " + hex(machine.pc) + " | status = " + machine.status);
+      bd(out.join("\n"));
+    }
+    else if (cmd === "sysregs") {
+      var rows = [];
+      machine.sysregs.forEach(function (v, k) { rows.push("S(" + k + ") = " + hex(v)); });
+      bd(rows.length ? rows.sort().join("\n") : "(no system registers written yet)");
+    }
+    else if (cmd === "lastpc") { bd(machine.lastPcs(16).map(hex).join(" ")); }
+    else if (cmd === "mmio") {
+      var rows2 = [];
+      machine.mmioLog.forEach(function (v, k) { rows2.push(k + " touched x" + v); });
+      bd(rows2.length ? rows2.join("\n") : "(no stub-MMIO touches yet)");
+    }
+    else if (cmd === "peek" || cmd === "peekp") {
+      var addr = parseNum(parts[1]), len = parts[2] ? Number(parseNum(parts[2])) : 64;
+      if (len > 4096) len = 4096;
+      var bytes;
+      if (cmd === "peek") bytes = machine.peekQuiet(addr, len);
+      else { bytes = new Uint8Array(len); for (var q = 0; q < len; q++) bytes[q] = Number(machine.readPhys(addr + BigInt(q), 1)); }
+      bd(hexDump(addr, bytes));
+    }
+    else if (cmd === "poke" || cmd === "pokep") {
+      var addr2 = parseNum(parts[1]), bs = parseBytes(parts.slice(2).join(""));
+      if (cmd === "poke") machine.pokeQuiet(addr2, bs);
+      else for (var w = 0; w < bs.length; w++) machine.writePhys(addr2 + BigInt(w), BigInt(bs[w]), 1);
+      bd("wrote " + bs.length + " byte(s) at " + hex(addr2));
+    }
+    else if (cmd === "setreg") {
+      var name = parts[1].toLowerCase(), val = parseNum(parts[2]);
+      if (name === "pc") machine.pc = val;
+      else if (name === "sp") machine.sp = val;
+      else if (name.charAt(0) === "x") machine.regs[Number(name.slice(1))] = val;
+      else { bd("unknown register: " + name); return; }
+      bd(name + " = " + hex(val));
+      updateStatus();
+    }
+    else if (cmd === "bp") { machine.addBreakpoint(parseNum(parts[1])); bd("breakpoint set at " + parts[1]); }
+    else if (cmd === "bplist") { bd(machine.breakpoints.size ? Array.from(machine.breakpoints).join(", ") : "(no breakpoints)"); }
+    else if (cmd === "bpclear") { machine.clearBreakpoints(); bd("breakpoints cleared"); }
+    else if (cmd === "step") {
+      var n = parts[1] ? Number(parts[1]) : 1;
+      if (n > 100000) n = 100000;
+      var done = 0;
+      while (done < n && machine.step()) done++;
+      bd("stepped " + done + " — PC " + hex(machine.pc) + ", status " + machine.status);
+      updateStatus();
+    }
+    else if (cmd === "run") {
+      var n2 = parts[1] ? Number(parts[1]) : 1000000;
+      if (n2 > 20000000) n2 = 20000000;
+      machine.run(n2);
+      bd("ran — PC " + hex(machine.pc) + ", status " + machine.status + (machine.trapInfo ? " — " + machine.trapInfo : ""));
+      updateStatus();
+    }
+    else if (cmd === "patch") {
+      var addr3 = parseNum(parts[1]), word = parseNum(parts[2]) & 0xFFFFFFFFn;
+      var bs2 = [Number(word & 0xFFn), Number((word >> 8n) & 0xFFn), Number((word >> 16n) & 0xFFn), Number((word >> 24n) & 0xFFn)];
+      machine.pokeQuiet(addr3, bs2);
+      bd("patched instruction at " + hex(addr3) + " -> 0x" + word.toString(16).padStart(8, "0"));
+    }
+    else if (cmd === "uartin") {
+      machine.queueUartRx(line.slice(7) + "\n");
+      bd("queued serial input: " + line.slice(7));
+    }
+    else bd("unknown command — type help");
+  } catch (e) { bd("error: " + e.message); }
+}
+
+document.getElementById('bdrun').addEventListener('click', function () {
+  var inp = document.getElementById('bdin');
+  bdCommand(inp.value);
+  inp.value = "";
+  inp.focus();
+});
+document.getElementById('bdin').addEventListener('keydown', function (e) {
+  if (e.key === "Enter") document.getElementById('bdrun').click();
+});
+</script>
+</body>
+</html>
