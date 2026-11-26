@@ -1,0 +1,63 @@
+name: Build macOS (arm64)
+
+# FakeDevice for Mac (Apple Silicon), built on a standard free runner.
+# Unsigned CI build (CODE_SIGNING_ALLOWED=NO) — the deliverable is the
+# compiled .app artifact, not a signed distribution build.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/build-macos-arm64.yml"
+
+jobs:
+  build-macos-arm64:
+    name: macOS app (arm64)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build FakeDevice for macOS arm64
+        run: |
+          xcodebuild -project native/FakeDevice.xcodeproj \
+            -scheme FakeDevice \
+            -configuration Release \
+            -destination 'platform=macOS,arch=arm64' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Verify the built app
+        run: |
+          APP_PATH="build/dd/Build/Products/Release/FakeDevice.app"
+          test -d "$APP_PATH"
+          file "$APP_PATH/Contents/MacOS/FakeDevice"
+          PLIST="$APP_PATH/Contents/Info.plist"
+          python3 - "$PLIST" <<'EOF'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              p = plistlib.load(f)
+          bundle = p.get("CFBundleIdentifier")
+          print("bundle id:", bundle)
+          assert bundle == "com.user.fakedevice", bundle
+          print("Info.plist verification OK")
+          EOF
+          for js in emu.js boot.js bridge.js; do
+            if find "$APP_PATH" -name "$js" | grep -q .; then
+              echo "ERROR: $js found inside the app — the native build must use the Swift core, not bundled JS"
+              exit 1
+            fi
+          done
+          echo "no bundled JS emulator core — OK"
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: FakeDevice-macOS-arm64
+          path: build/dd/Build/Products/Release/FakeDevice.app

@@ -1,0 +1,83 @@
+name: Build IPA (iPadOS)
+
+# Unsigned iPadOS IPA for FakeDevice, built on a standard free runner.
+# Sean sideloads the result through Signulous, so the app is built with
+# code signing fully disabled and packaged as a plain Payload zip.
+#
+# The app target must contain the native Swift core (FakeDeviceCore).
+# A verification step below fails the build if any JavaScript emulator
+# core files (emu.js / boot.js / bridge.js) end up inside the .app —
+# the native apps never run the emulator on JavaScript.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/build-ipa.yml"
+
+jobs:
+  build-ipa:
+    name: Unsigned IPA (iPadOS)
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build app (unsigned, iphoneos)
+        run: |
+          xcodebuild -project native/FakeDevice.xcodeproj \
+            -scheme FakeDevice \
+            -sdk iphoneos \
+            -configuration Release \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Verify bundle id and file-sharing keys in built app
+        run: |
+          PLIST="build/dd/Build/Products/Release-iphoneos/FakeDevice.app/Info.plist"
+          test -f "$PLIST"
+          python3 - "$PLIST" <<'EOF'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              p = plistlib.load(f)
+          bundle = p.get("CFBundleIdentifier")
+          print("bundle id:", bundle)
+          assert bundle == "com.user.fakedevice", bundle
+          for key in ("UIFileSharingEnabled", "LSSupportsOpeningDocumentsInPlace"):
+              value = p.get(key)
+              print(f"{key} = {value}")
+              assert value is True, f"{key} is not true in the built app"
+          print("Info.plist verification OK")
+          EOF
+
+      - name: Verify no JavaScript emulator core inside the app
+        run: |
+          APP_PATH="build/dd/Build/Products/Release-iphoneos/FakeDevice.app"
+          test -d "$APP_PATH"
+          echo "files inside FakeDevice.app:"
+          find "$APP_PATH" -type f | sort
+          for js in emu.js boot.js bridge.js; do
+            if find "$APP_PATH" -name "$js" | grep -q .; then
+              echo "ERROR: $js found inside the app — the native build must use the Swift core, not bundled JS"
+              exit 1
+            fi
+          done
+          echo "no bundled JS emulator core — OK"
+
+      - name: Package IPA
+        run: |
+          APP_PATH="build/dd/Build/Products/Release-iphoneos/FakeDevice.app"
+          test -d "$APP_PATH"
+          rm -rf Payload FakeDevice-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry FakeDevice-unsigned.ipa Payload
+          ls -lh FakeDevice-unsigned.ipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: FakeDevice-unsigned
+          path: FakeDevice-unsigned.ipa
