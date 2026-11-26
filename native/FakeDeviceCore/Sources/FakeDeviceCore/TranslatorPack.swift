@@ -24,6 +24,8 @@ public struct TranslatorPack: Codable {
     public var cpus: Cpus
     public var deviceTree: DeviceTree
     public var bootArgs: BootArgs
+    public var aic: Aic
+    public var timer: Timer
     public var lockRegs: LockRegs
 
     public struct Memory: Codable {
@@ -43,6 +45,7 @@ public struct TranslatorPack: Codable {
         public var size: String
         public var compatible: String
         public var interrupts: [UInt32]
+        public var phandle: UInt32
         public var registers: Registers
         public struct Registers: Codable { public var utrstat: String; public var utxh: String; public var urxh: String }
     }
@@ -55,11 +58,39 @@ public struct TranslatorPack: Codable {
         public var regAddress: String
         public var regSize: String
         public var ranges: [Range]
+        public var phandle: UInt32
+        public var interruptParent: UInt32
         public struct Range: Codable {
             public var childAddress: String
             public var parentAddress: String
             public var size: String
         }
+    }
+    // The interrupt controller under arm-io (stage-5 frontier 21): PE's
+    // pe_arm_map_interrupt_controller looks up a node whose
+    // "interrupt-controller" property reads "master", and IOKit's DT
+    // interrupt resolution follows arm-io's interrupt-parent phandle to
+    // this node. "reg" is an offset within arm-io, like the uart's.
+    public struct Aic: Codable {
+        public var name: String
+        public var compatible: String
+        public var deviceType: String
+        public var regOffset: String
+        public var regSize: String
+        public var interruptControllerValue: String
+        public var interruptCells: UInt32
+        public var aicVersion: UInt32
+        public var phandle: UInt32
+    }
+    // The "timer" device PE maps alongside the interrupt controller
+    // (stage-5 frontier 21); also a child of arm-io, reg as an offset.
+    public struct Timer: Codable {
+        public var name: String
+        public var compatible: String
+        public var deviceType: String
+        public var regOffset: String
+        public var regSize: String
+        public var phandle: UInt32
     }
     public struct LockRegs: Codable {
         public var name: String
@@ -161,6 +192,7 @@ public struct TranslatorPack: Codable {
                          pack.uart.registers.utxh, pack.uart.registers.urxh,
                          pack.armIo.regAddress, pack.armIo.regSize, pack.bootArgs.bootFlags]
             + pack.armIo.ranges.flatMap { [$0.childAddress, $0.parentAddress, $0.size] }
+            + [pack.aic.regOffset, pack.aic.regSize, pack.timer.regOffset, pack.timer.regSize]
             + [pack.lockRegs.amcc.apertureSize, pack.lockRegs.ctrrA.lowerLimit, pack.lockRegs.ctrrA.upperLimit]
             + pack.lockRegs.amcc.aperturePhysAddr
         for hex in hexFields where TranslatorPack.parseHex(hex) == nil {
