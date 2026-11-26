@@ -41,14 +41,19 @@ target (`SUPPORTED_PLATFORMS = iphoneos iphonesimulator macosx`):
   plus `fakedevice-check`, a headless harness that proves the port
   against the reference implementation's known results. The app target
   compiles the core's sources directly; the package exists so the core
-  can be built and checked without Xcode.
+  can be built and checked without Xcode. Verified 2026-11-26:
+  fakedevice-check passes 73/73, including booting the real kernelcache
+  to the reference's exact endpoint (first exception delivered at
+  instruction 9,261,731 with identical ESR/FAR/ELR/SPSR; kernel parked
+  at 0xFFFFFFF0081BA410).
 
 ## Wiring the core in
 
-`FakeDeviceApp.swift` constructs the core. Until the port landed it used
-`CorePendingPlaceholder()`; the real core is `FakeDeviceCoreMachine()`,
-which conforms to the same `EmulatorCore` protocol, so the swap is one
-line and the views never change.
+`FakeDeviceApp.swift` constructs the core: `FakeDeviceCoreMachine()`,
+which conforms to the same `EmulatorCore` protocol the views use, so
+the views never change. (During the scaffold phase the entry point used
+a clearly-labelled placeholder; the app target now compiles the core
+sources directly and the placeholder is gone.)
 
 ## macOS x86_64 (Intel) notes
 

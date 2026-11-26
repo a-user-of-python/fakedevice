@@ -12,9 +12,16 @@
 		CC0000000000000000000003 /* MacRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000003 /* MacRootView.swift */; };
 		CC0000000000000000000004 /* iPadRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000004 /* iPadRootView.swift */; };
 		CC0000000000000000000005 /* EmulatorViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000005 /* EmulatorViewModel.swift */; };
-		CC0000000000000000000006 /* EmulatorCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000006 /* EmulatorCore.swift */; };
 		CC0000000000000000000007 /* GlassCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000007 /* GlassCard.swift */; };
 		CC0000000000000000000008 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = BB0000000000000000000008 /* Assets.xcassets */; };
+		EE0000000000000000000001 /* EmulatorCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000001 /* EmulatorCore.swift */; };
+		EE0000000000000000000002 /* Machine.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000002 /* Machine.swift */; };
+		EE0000000000000000000003 /* CPU.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000003 /* CPU.swift */; };
+		EE0000000000000000000004 /* SIMD.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000004 /* SIMD.swift */; };
+		EE0000000000000000000005 /* Boot.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000005 /* Boot.swift */; };
+		EE0000000000000000000006 /* Backdoor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000006 /* Backdoor.swift */; };
+		EE0000000000000000000007 /* FakeDeviceCoreMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000007 /* FakeDeviceCoreMachine.swift */; };
+		EE0000000000000000000008 /* SelfTestProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000008 /* SelfTestProgram.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -23,11 +30,18 @@
 		BB0000000000000000000003 /* MacRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacRootView.swift; sourceTree = "<group>"; };
 		BB0000000000000000000004 /* iPadRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = iPadRootView.swift; sourceTree = "<group>"; };
 		BB0000000000000000000005 /* EmulatorViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorViewModel.swift; sourceTree = "<group>"; };
-		BB0000000000000000000006 /* EmulatorCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorCore.swift; sourceTree = "<group>"; };
 		BB0000000000000000000007 /* GlassCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassCard.swift; sourceTree = "<group>"; };
 		BB0000000000000000000008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		BB0000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		AA0000000000000000000009 /* FakeDevice.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FakeDevice.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DD0000000000000000000001 /* EmulatorCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EmulatorCore.swift; sourceTree = "<group>"; };
+		DD0000000000000000000002 /* Machine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Machine.swift; sourceTree = "<group>"; };
+		DD0000000000000000000003 /* CPU.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CPU.swift; sourceTree = "<group>"; };
+		DD0000000000000000000004 /* SIMD.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SIMD.swift; sourceTree = "<group>"; };
+		DD0000000000000000000005 /* Boot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Boot.swift; sourceTree = "<group>"; };
+		DD0000000000000000000006 /* Backdoor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Backdoor.swift; sourceTree = "<group>"; };
+		DD0000000000000000000007 /* FakeDeviceCoreMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeDeviceCoreMachine.swift; sourceTree = "<group>"; };
+		DD0000000000000000000008 /* SelfTestProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfTestProgram.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -45,6 +59,7 @@
 			isa = PBXGroup;
 			children = (
 				AA0000000000000000000003 /* FakeDevice */,
+				AA0000000000000000000010 /* FakeDeviceCore */,
 				AA0000000000000000000004 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -57,7 +72,6 @@
 				BB0000000000000000000003 /* MacRootView.swift */,
 				BB0000000000000000000004 /* iPadRootView.swift */,
 				BB0000000000000000000005 /* EmulatorViewModel.swift */,
-				BB0000000000000000000006 /* EmulatorCore.swift */,
 				BB0000000000000000000007 /* GlassCard.swift */,
 				BB0000000000000000000008 /* Assets.xcassets */,
 				BB0000000000000000000009 /* Info.plist */,
@@ -71,6 +85,21 @@
 				AA0000000000000000000009 /* FakeDevice.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		AA0000000000000000000010 /* FakeDeviceCore */ = {
+			isa = PBXGroup;
+			children = (
+				DD0000000000000000000001 /* EmulatorCore.swift */,
+				DD0000000000000000000002 /* Machine.swift */,
+				DD0000000000000000000003 /* CPU.swift */,
+				DD0000000000000000000004 /* SIMD.swift */,
+				DD0000000000000000000005 /* Boot.swift */,
+				DD0000000000000000000006 /* Backdoor.swift */,
+				DD0000000000000000000007 /* FakeDeviceCoreMachine.swift */,
+				DD0000000000000000000008 /* SelfTestProgram.swift */,
+			);
+			path = ../FakeDeviceCore/Sources/FakeDeviceCore;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -147,8 +176,15 @@
 				CC0000000000000000000003 /* MacRootView.swift in Sources */,
 				CC0000000000000000000004 /* iPadRootView.swift in Sources */,
 				CC0000000000000000000005 /* EmulatorViewModel.swift in Sources */,
-				CC0000000000000000000006 /* EmulatorCore.swift in Sources */,
 				CC0000000000000000000007 /* GlassCard.swift in Sources */,
+				EE0000000000000000000001 /* EmulatorCore.swift in Sources */,
+				EE0000000000000000000002 /* Machine.swift in Sources */,
+				EE0000000000000000000003 /* CPU.swift in Sources */,
+				EE0000000000000000000004 /* SIMD.swift in Sources */,
+				EE0000000000000000000005 /* Boot.swift in Sources */,
+				EE0000000000000000000006 /* Backdoor.swift in Sources */,
+				EE0000000000000000000007 /* FakeDeviceCoreMachine.swift in Sources */,
+				EE0000000000000000000008 /* SelfTestProgram.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

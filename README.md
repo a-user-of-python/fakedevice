@@ -19,7 +19,9 @@ Work in progress. As of the stage-4 snapshot in `build/`:
   entry point.
 - The kernel runs its own start code, programs TTBR0/TTBR1/TCR, turns its MMU
   on, parses the device tree, builds its CPU topology, and executes roughly
-  **8.6 million instructions**.
+  **9.3 million instructions** before the first delivered fault (the count
+  moves as the boot work progresses; the native Swift core is verified to
+  reach the identical endpoint — see `native/README.md`).
 - Faults and undefined instructions are delivered to the kernel's own
   exception vector (VBAR) with ESR/FAR/ELR/SPSR set the way hardware sets
   them, and `ERET` returns from them.
