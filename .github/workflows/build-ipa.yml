@@ -81,3 +81,31 @@ jobs:
         with:
           name: FakeDevice-unsigned
           path: FakeDevice-unsigned.ipa
+
+  core-parity:
+    name: Core parity gate (fakedevice-check to 200M)
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build fakedevice-check (release)
+        run: |
+          swift build -c release \
+            --package-path native/FakeDeviceCore \
+            --product fakedevice-check
+          ls -lh native/FakeDeviceCore/.build/release/fakedevice-check
+
+      - name: Fetch the iOS 14.8 kernelcache (range requests from Apple's IPSW)
+        run: |
+          python3 native/FakeDeviceCore/ci/fetch_kernel.py /tmp/kernelcache.im4p
+          swiftc -O native/FakeDeviceCore/ci/unwrap_kernel.swift -o /tmp/unwrap_kernel
+          /tmp/unwrap_kernel /tmp/kernelcache.im4p /tmp/kernelcache.raw
+          echo "kernelcache sha256:"
+          shasum -a 256 /tmp/kernelcache.raw
+          shasum -a 256 /tmp/kernelcache.raw | grep -q 2bf684f41f79bd309e70398b6116eb2054e217892daa52e919bdfd7634e4f246
+
+      - name: Run fakedevice-check with the real kernel (parity gate)
+        run: |
+          native/FakeDeviceCore/.build/release/fakedevice-check \
+            /tmp/kernelcache.raw build/translator-pack-iphone11.json
