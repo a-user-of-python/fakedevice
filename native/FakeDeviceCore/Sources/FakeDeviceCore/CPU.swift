@@ -109,7 +109,18 @@ extension Machine {
         case "3,0,4,2,2": return 4                                   // CurrentEL = EL1
         case "3,3,0,0,1": return 0x8444C004                          // CTR_EL0 (plausible)
         case "3,0,0,4,0": return 0x111111                            // ID_AA64PFR0_EL1 (plausible)
-        case "3,3,13,0,2": return UInt64(icount) &* 41               // CNTPCT_EL0: fake timer
+        case "3,3,13,0,2": return UInt64(icount) &* 41               // CNTPCT_EL0
+        case "3,3,14,0,2": return UInt64(icount) &* 41               // CNTVCT_EL0: the kernel's timebase (frontier 20; was unmodelled -> read 0 forever)
+        case "3,3,14,3,0":                                           // CNTV_TVAL_EL0: signed ticks remaining
+            if let d = cntvDeadline { return (d &- (UInt64(icount) &* 41)) & 0xFFFFFFFF }
+            return sysregs[sysKey(3, 3, 14, 3, 0)] ?? 0
+        case "3,3,14,3,2": return cntvDeadline ?? 0                  // CNTV_CVAL_EL0
+        case "3,3,14,3,1":                                           // CNTV_CTL_EL0: ISTATUS (bit 2) is computed, not stored
+            let stored = sysregs[sysKey(3, 3, 14, 3, 1)] ?? 0
+            var fired = false
+            if (stored & 1) != 0, let d = cntvDeadline,
+               Int64(bitPattern: UInt64(icount) &* 41) >= Int64(bitPattern: d) { fired = true }
+            return (stored & 3) | (fired ? 4 : 0)
         case "3,3,0,0,7": return 4                                   // DCZID_EL0: 64-byte ZVA blocks, allowed
         case "3,3,14,0,0": return 24_000_000                         // CNTFRQ_EL0: 24 MHz
         case "3,4,15,0,4":                                           // Apple core register: bit 1 "ready", writes stick
@@ -121,6 +132,11 @@ extension Machine {
     func msr(_ op0: Int, _ op1: Int, _ crn: Int, _ crm: Int, _ op2: Int, _ val: UInt64) {
         let k = sysKey(op0, op1, crn, crm, op2)
         sysregs[k] = val & M64
+        if k == "3,3,14,3,0" {                                       // CNTV_TVAL_EL0: deadline = now + sext32(val) (frontier 20)
+            let d = Int64(Int32(truncatingIfNeeded: val))
+            cntvDeadline = (UInt64(icount) &* 41) &+ UInt64(bitPattern: d)
+        }
+        if k == "3,3,14,3,2" { cntvDeadline = val & M64 }            // CNTV_CVAL_EL0: absolute deadline
         if k == "3,0,2,0,0" || k == "3,0,2,0,1" || k == "3,0,2,0,2" { flushTlb() }   // TTBR0/TTBR1/TCR changed
         if k == "3,0,1,0,0" {                                                        // SCTLR_EL1
             let on = val & 1 != 0
@@ -151,6 +167,7 @@ extension Machine {
             let spsr = sysregs[sysKey(3, 0, 4, 0, 0)] ?? 0                    // SPSR_EL1
             nFlag = Int((spsr >> 31) & 1); zFlag = Int((spsr >> 30) & 1)
             cFlag = Int((spsr >> 29) & 1); vFlag = Int((spsr >> 28) & 1)
+            sysregs[sysKey(3, 0, 4, 2, 3)] = (spsr >> 22) & 1                 // PAN restored from SPSR_EL1.PAN (frontier 18)
             pc = sysregs[sysKey(3, 0, 4, 0, 1)] ?? 0                          // ELR_EL1
             return true
         }
@@ -188,6 +205,15 @@ extension Machine {
                 return true
             }
             if l == 0 && crn == 8 { flushTlb(); pc = nextPc; return true }   // TLBI *
+            if l == 0 && op0 == 0 && crn == 4 && op1 == 0 && op2 == 4 {
+                // MSR PAN, #imm (PSTATE-field immediate; stage-5 frontier 18).
+                // The generic path would file this under a nonsense key and
+                // the kernel's rsr("pan") would read 0 forever. The immediate
+                // lives in the CRm field; PAN is sysreg 3,0,4,2,3.
+                sysregs[sysKey(3, 0, 4, 2, 3)] = UInt64(crm & 1)
+                pc = nextPc
+                return true
+            }
             if l == 1 { setReg(rd, mrs(op0, op1, crn, crm, op2)) }
             else { msr(op0, op1, crn, crm, op2, getReg(rd)) }
             pc = nextPc
@@ -265,7 +291,14 @@ extension Machine {
                     let m = ((UInt64(1) << (imms + 1)) - 1) << (bits - immr)
                     let field = (src << (bits - immr)) & m
                     if opc == 1 { r = ((getReg(rd) & wmask) & ~m) | field }
-                    else if opc == 0 { r = shiftReg(src, 2, immr, bits) }             // ASR form
+                    else if opc == 0 {                                                  // SBFIZ: sign-extended insert
+                        // (ASR-immediate has imms = datasize-1, so it always lands
+                        // in the extract branch above; this branch is the insert
+                        // form. Stage-5 frontier 10: executing it as ASR returned
+                        // ~0 for the kernel's sbfiz and zeroed a zone chunk base.)
+                        let fv = src & ((UInt64(1) << (imms + 1)) - 1)
+                        r = (sext64(fv, imms + 1) << (bits - immr)) & wmask
+                    }
                     else { r = field }                                                // LSL form
                 }
                 setReg(rd, r & wmask)
@@ -362,6 +395,55 @@ extension Machine {
         }
 
         // --- loads & stores: single ---
+        if insn & 0xFFE0FC00 == 0x9AC03000 {                                  // PACGA (stage-5 frontier 16)
+            // Pointer Authentication generic code: architecturally QARMA over
+            // (Rn = data, Rm = modifier) keyed by APGAKey_EL1. The exact QARMA
+            // variant is IMP-DEF; every kernel use on the boot path is
+            // compute-and-compare (chained struct hashes), so the machine
+            // provides a deterministic, key-dependent function — a 6-round ARX
+            // mix over data/modifier/both key halves, transcribed from the
+            // reference (including its double-rounded round constant).
+            let klo = sysregs[sysKey(3, 0, 2, 3, 1)] ?? 0, khi = sysregs[sysKey(3, 0, 2, 3, 2)] ?? 0
+            var x = (getReg(rn) ^ klo) & M64
+            let mod = getReg(rm)
+            func rot(_ v: UInt64, _ s: Int) -> UInt64 { ((v << s) | (v >> (64 - s))) & M64 }
+            for i in 0..<6 {
+                let termD = Double(0x9E3779B97F4A7C15) * Double(i)
+                let term = UInt64(termD.truncatingRemainder(dividingBy: 0x1p64))
+                x = (x &+ (mod ^ khi ^ term)) & M64
+                x = rot(x, 23)
+                x = (x &* 0xBF58476D1CE4E5B9) & M64
+                x ^= x >> 29
+                x = rot(x, 41)
+                x = (x &* 0x94D049BB133111EB) & M64
+                x ^= x >> 32
+            }
+            setReg(rd, x & M64)
+            pc = nextPc
+            return true
+        }
+        if insn & 0x3F000000 == 0x19000000 && ((insn >> 21) & 1) == 0 {
+            // STLUR / LDAPUR + sign-extending LDAPURSB/SH/SW (stage-5 frontier 9):
+            // unscaled ordered load/store, imm9 offset, no writeback; ordering
+            // semantics are no-ops in this single-CPU model. Bit 23 =
+            // sign-extending load family, bit 22 = load (or W-destination in
+            // the sign family).
+            let size = Int((insn >> 30) & 3), bytes = 1 << size
+            var imm = Int64((insn >> 12) & 0x1FF)
+            if imm & 0x100 != 0 { imm |= ~0x1FF }
+            let addr = (getReg(rn, true) &+ UInt64(bitPattern: imm)) & M64
+            let b23 = (insn >> 23) & 1, b22 = (insn >> 22) & 1
+            if b23 == 0 && b22 == 0 { try writeMem(addr, bytes, getReg(rd)) }         // STLUR
+            else if b23 == 0 { setReg(rd, try readMem(addr, bytes)) }                 // LDAPUR (zero-extended)
+            else {                                                                    // LDAPURSB/SH/SW
+                if size == 3 { return try undef(insn) }
+                var val = sext64(try readMem(addr, bytes), bytes * 8)
+                if b22 == 1 { val &= 0xFFFFFFFF }
+                setReg(rd, val)
+            }
+            pc = nextPc
+            return true
+        }
         if insn & 0x3F000000 == 0x18000000 {                                  // LDR literal (V=0)
             let opc = Int((insn >> 30) & 3)
             if opc == 3 { pc = nextPc; return true }                          // PRFM literal: no-op
@@ -371,6 +453,45 @@ extension Machine {
             if opc == 0 { setReg(rd, try readMem(addr, 4)) }
             else if opc == 1 { setReg(rd, try readMem(addr, 8)) }
             else { setReg(rd, sext64(try readMem(addr, 4), 32)) }             // LDRSW
+            pc = nextPc
+            return true
+        }
+        if insn & 0x3F200C00 == 0x38200000 {                                  // LSE atomics: LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN/SWP
+            // bits 29:24 = 111010 with bit 21 = 1 AND bits 11:10 = 00
+            // (stage-5 frontiers 6+8). These words also match the load/store
+            // mask below, which used to claim them and execute e.g. LDADD as a
+            // random unscaled load/store. The bits 11:10 = 00 term is
+            // load-bearing: without it this block also claims LDR/STR
+            // register-offset words (bits 11:10 = 10) — it executed the
+            // chained-fixup veneer's ldrsw as an LDUMIN that zeroed the
+            // jump-table entry it was reading. A/L ordering variants are
+            // no-ops in this single-CPU model.
+            let size = Int((insn >> 30) & 3), bytes = 1 << size
+            let addr = getReg(rn, true)
+            let rs = Int((insn >> 16) & 31), o3 = Int((insn >> 15) & 1), opc = Int((insn >> 12) & 7)
+            let m: UInt64 = bytes == 8 ? M64 : (UInt64(1) << (bytes * 8)) - 1
+            let old = try readMem(addr, bytes) & m, opnd = getReg(rs) & m
+            func sgn(_ v: UInt64) -> Int64 { Int64(bitPattern: sext64(v, bytes * 8)) }
+            if o3 == 1 && opc == 4 && rs == 31 {                              // LDAPR (stage-5 frontier 11)
+                // Load-Acquire RCpc (register form) shares this space: bits
+                // 15:12 = 1100 with Rs = 11111 (any other Rs is unallocated).
+                // Plain load in this single-CPU model.
+                setReg(rd, old)
+                pc = nextPc
+                return true
+            }
+            var nv: UInt64
+            if o3 == 1 { if opc != 0 { return try undef(insn) }; nv = opnd }  // SWP
+            else if opc == 0 { nv = (old &+ opnd) & m }                       // LDADD
+            else if opc == 1 { nv = old & ~opnd & m }                         // LDCLR
+            else if opc == 2 { nv = old ^ opnd }                              // LDEOR
+            else if opc == 3 { nv = old | opnd }                              // LDSET
+            else if opc == 4 { nv = sgn(old) >= sgn(opnd) ? old : opnd }      // LDSMAX
+            else if opc == 5 { nv = sgn(old) <= sgn(opnd) ? old : opnd }      // LDSMIN
+            else if opc == 6 { nv = old >= opnd ? old : opnd }                // LDUMAX
+            else { nv = old <= opnd ? old : opnd }                            // LDUMIN
+            try writeMem(addr, bytes, nv)
+            setReg(rd, old)
             pc = nextPc
             return true
         }
@@ -414,15 +535,59 @@ extension Machine {
             pc = nextPc
             return true
         }
-        if insn & 0x3F000000 == 0x08000000 {                                  // exclusives / atomics (simple model)
-            let size = Int((insn >> 30) & 3), l = (insn >> 21) & 1
-            let bytes = 1 << size
+        if insn & 0x3F000000 == 0x08000000 {                                  // exclusives + CAS (stage-5 frontier 6)
+            // This space was originally a "simple model" that treated every
+            // word as a plain load or store — including CAS, which it
+            // executed as a load that never stored. A CAS-based lock acquire
+            // then "succeeded" without ever writing the lock word, and the
+            // matching unlock panicked. Single-CPU model: exclusives always
+            // succeed, CAS is exact.
+            let size = Int((insn >> 30) & 3), bytes = 1 << size
             let addr = getReg(rn, true)
-            let rs = Int((insn >> 16) & 31)
-            if l == 1 { setReg(rd, try readMem(addr, bytes)) }
-            else {
+            let rs = Int((insn >> 16) & 31), rt2 = Int((insn >> 10) & 31)
+            let m: UInt64 = bytes == 8 ? M64 : (UInt64(1) << (bytes * 8)) - 1
+            let kind = Int((insn >> 21) & 3), bit23 = (insn >> 23) & 1, o3 = Int((insn >> 15) & 1)
+            // This space also holds LDAR/STLR. True layout (capstone-
+            // calibrated): with bit 23 set, kind 1 = CAS, kind 3 = CASA
+            // (bit 15 = release for both), kind 0 + bit 15 + Rs/Rt2 = 11111
+            // = STLR, kind 2 + bit 15 + Rs/Rt2 = 11111 = LDAR.
+            if bit23 == 1 && (kind == 1 || kind == 3) {                       // CAS / CASL / CASA / CASAL
+                if rt2 != 31 { return try undef(insn) }
+                // ARM semantics: compare [Rn] against Rs; on match store Rt;
+                // the OLD value is written back to **Rs**, not Rt (stage-5
+                // frontier 15: writing it to Rt made every `casal Rs, Rt,
+                // [Rn]; cmp Rs, #0` retry loop spin forever).
+                let expected = getReg(rs) & m
+                let old = try readMem(addr, bytes) & m
+                if old == expected { try writeMem(addr, bytes, getReg(rd) & m) }
+                setReg(rs, old)
+                pc = nextPc
+                return true
+            }
+            if bit23 == 1 && kind == 0 && o3 == 1 && rs == 31 && rt2 == 31 {  // STLR
                 try writeMem(addr, bytes, getReg(rd))
-                if rs != 31 { setReg(rs, 0) }                                 // exclusive store: report success
+                pc = nextPc
+                return true
+            }
+            if bit23 == 1 && kind == 2 && o3 == 1 && rs == 31 && rt2 == 31 {  // LDAR
+                setReg(rd, try readMem(addr, bytes))
+                pc = nextPc
+                return true
+            }
+            if bit23 == 1 { return try undef(insn) }
+            // exclusives: kind 0 STXR, 1 STXP, 2 LDXR, 3 LDXP (bit 15 = acquire/release variant)
+            if kind == 0 {
+                try writeMem(addr, bytes, getReg(rd))
+                if rs != 31 { setReg(rs, 0) }
+            } else if kind == 1 {
+                try writeMem(addr, bytes, getReg(rd))
+                try writeMem(addr &+ UInt64(bytes), bytes, getReg(rt2))
+                if rs != 31 { setReg(rs, 0) }
+            } else if kind == 2 {
+                setReg(rd, try readMem(addr, bytes))
+            } else {
+                setReg(rd, try readMem(addr, bytes))
+                setReg(rt2, try readMem(addr &+ UInt64(bytes), bytes))
             }
             pc = nextPc
             return true
