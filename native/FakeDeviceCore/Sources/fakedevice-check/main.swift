@@ -234,13 +234,28 @@ if CommandLine.arguments.count > 1 {
                 for r in 0...30 { parts.append(String(m.x[r], radix: 16)) }
                 print(parts.joined(separator: " "))
             }
-            m.run(69_700_000)
-            var t = 69_700_000
-            snap(t)
+            // Per-step FNV-1a hash chain over (pc, sp, x0..x30) across
+            // the 10k segment: the first step whose hash differs from
+            // the reference is the step that diverged.
+            func hashState() -> UInt64 {
+                var h: UInt64 = 0xcbf29ce484222325
+                func mix(_ v: UInt64) {
+                    h ^= v & 0xFFFFFFFF
+                    h = h &* 0x100000001b3
+                    h ^= v >> 32
+                    h = h &* 0x100000001b3
+                }
+                mix(m.pc); mix(m.sp)
+                for r in 0...30 { mix(m.x[r]) }
+                return h
+            }
+            m.run(69_790_000)
+            var t = 69_790_000
+            print("H \(t) \(String(hashState(), radix: 16))")
             while t < 69_800_000 {
-                m.run(10_000)
-                t += 10_000
-                snap(t)
+                _ = m.step()
+                t += 1
+                print("H \(t) \(String(hashState(), radix: 16))")
             }
             exit(0)
         }
