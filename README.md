@@ -59,14 +59,20 @@ alternative path (and is how other versions will be tried later).
   the fake machine has none yet). There is **no serial (UART) output
   yet** — the console is not awake that early — so this is not a full
   boot, and no claim of one is made.
-- **Native Swift core at parity:** `FakeDeviceCore` is a from-scratch
-  Swift port of the emulator (no JavaScript anywhere in the native
-  apps). Its headless acceptance harness, `fakedevice-check`, passes
-  82/82 checks, including booting the real kernel to the exact endpoint
-  the reference core reached when the port was measured (first
-  exception delivered at instruction 17,723,144; kernel parked at
-  `0xFFFFFFF0081BA410`) and building the ADT to the identical 2,740
-  bytes from the pack.
+- **Native Swift core synced to the reference (2026-11-26):**
+  `FakeDeviceCore` is a from-scratch Swift port of the emulator (no
+  JavaScript anywhere in the native apps), now ported forward through
+  stage-5 frontiers 3–20: little-endian ADT with real arm-io ranges,
+  `/chosen` dram-base/size and the lock-regs subtree (the ADT is now
+  4,148 bytes from the pack), SIMD shift-by-immediate and
+  shift-by-register groups, LD/ST multiple structures, LSE atomics with
+  exact CAS, STLUR/LDAPUR and LDAPR, PACGA, PSTATE.PAN, and the CNTV
+  timer timebase. Its headless acceptance harness, `fakedevice-check`,
+  runs in CI against the real kernelcache (range-fetched from Apple's
+  IPSW inside the job) and asserts the reference's exact trajectory:
+  identical PC at 50M / 100M / 150M / 200M instructions with zero
+  exceptions delivered. This sync is intermediate work, not a release —
+  the next version ships when the reference reaches a full boot.
 - A backdoor console (web page and native apps) gives open access to the
   fake phone: inspect/patch memory and registers, set breakpoints,
   single-step, and type into its serial port.
