@@ -30,7 +30,7 @@
   },
   "bootArgs": {
     "bootFlags": "0x0",
-    "commandLine": "-v",
+    "commandLine": "-v debug=0xa",
     "layout": {
       "bootFlags": 1136,
       "commandLine": 112,
@@ -111,6 +111,9 @@
     "name": "cpus",
     "sizeCells": 0
   },
+  "defaults": {
+    "name": "defaults"
+  },
   "description": "FakeDevice translator pack: the complete machine definition for the iPhone 11 (t8030) as DATA. The emulator core (web JS today, native Swift in the apps) contains no machine constants; everything t8030-specific lives here. 64-bit addresses and sizes are hex strings; small enumerations are plain numbers. See PACK.md for the meaning of every field.",
   "deviceTree": {
     "chosenNodeName": "chosen",
@@ -144,7 +147,7 @@
   },
   "uart": {
     "base": "0x235200000",
-    "compatible": "samsung,uart",
+    "compatible": "uart-1,samsung",
     "interrupts": [
       0,
       81,
