@@ -230,6 +230,25 @@ if CommandLine.arguments.count > 1 {
         chk("boot chain completed", true)
         chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
+        if CommandLine.arguments.contains("trace") {
+            // Debug mode (temporary): full-register snapshots every 1M
+            // instructions from 50M to 100M, to bracket where a register
+            // value first diverges from the JS reference.
+            func snap(_ t: Int) {
+                var parts = ["R", String(t), String(m.pc, radix: 16), String(m.sp, radix: 16)]
+                for r in 0...30 { parts.append(String(m.x[r], radix: 16)) }
+                print(parts.joined(separator: " "))
+            }
+            m.run(50_000_000)
+            var t = 50_000_000
+            snap(t)
+            while t < 100_000_000 {
+                m.run(1_000_000)
+                t += 1_000_000
+                snap(t)
+            }
+            exit(0)
+        }
         // Parity trajectory, measured from the JS reference (frontiers
         // 3-22 state) on 2026-11-26: the kernel executes past 200M
         // instructions with ZERO exceptions delivered. The checkpoints
