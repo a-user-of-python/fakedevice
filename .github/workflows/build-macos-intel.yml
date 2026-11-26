@@ -21,9 +21,9 @@ name: Build macOS (Intel x86_64)
 #                        natively on Intel and runs it (the port's
 #                        self-test must print "test" / "55" through the
 #                        fake UART and reproduce the reference boot
-#                        results). This job activates automatically once
-#                        native/FakeDeviceCore/Package.swift lands; until
-#                        then it is skipped, visibly, in the run.
+#                        results). Its build/run steps activate once
+#                        native/FakeDeviceCore/Package.swift lands;
+#                        until then the job reports the core as pending.
 #
 # Unsigned CI builds (CODE_SIGNING_ALLOWED=NO), same as the other lanes.
 
@@ -144,18 +144,32 @@ jobs:
   core-smoke-intel:
     name: Core smoke test (x86_64, native Intel)
     runs-on: macos-26-intel
-    # Activates once the FakeDeviceCore SwiftPM package lands in the repo.
-    if: ${{ hashFiles('native/FakeDeviceCore/Package.swift') != '' }}
+    # The build/run steps activate once the FakeDeviceCore SwiftPM
+    # package lands in the repo; until then the job runs, prints that the
+    # core is still pending, and succeeds as a no-op (hashFiles cannot be
+    # used in a job-level if, hence the step-level gate).
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check whether FakeDeviceCore has landed
+        id: core
+        run: |
+          if [ -f native/FakeDeviceCore/Package.swift ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "FakeDeviceCore package not in the repo yet — core smoke test pending the Swift port."
+          fi
+
       - name: Confirm this runner is really Intel
+        if: steps.core.outputs.present == 'true'
         run: |
           set -euo pipefail
           test "$(uname -m)" = "x86_64"
           uname -a
 
       - name: Build fakedevice-check natively (x86_64)
+        if: steps.core.outputs.present == 'true'
         run: |
           set -euo pipefail
           swift build \
@@ -168,6 +182,7 @@ jobs:
           lipo -info "$CHECK" | grep -q "x86_64"
 
       - name: Run fakedevice-check natively on Intel
+        if: steps.core.outputs.present == 'true'
         run: |
           set -euo pipefail
           native/FakeDeviceCore/.build/release/fakedevice-check
