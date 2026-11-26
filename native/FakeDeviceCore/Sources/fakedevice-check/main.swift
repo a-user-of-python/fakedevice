@@ -6,7 +6,7 @@
 //   sdiv        — the reference's SDIV semantics (probe-verified against JS)
 //   simd        — test_simd.mjs's 30 checks on the same program bytes
 //   mul         — test_mul.mjs's 14 checks on the same program bytes
-//   adt         — buildADT length is 4,948 bytes, like the reference
+//   adt         — buildADT length is 4,988 bytes, like the reference
 //   kernel boot — with a kernelcache path argument: the Swift core must
 //                 track the reference's exact trajectory, measured from
 //                 the JS core the same day (the boot frontier moves as
@@ -97,6 +97,7 @@ chkEq("pack timer phandle", pack.timer.phandle, 5)
 chkEq("pack defaults name", pack.defaults.name, "defaults")
 chkEq("pack uart compatible", pack.uart.compatible, "uart-1,samsung")
 chkEq("pack boot command line", pack.bootArgs.commandLine, "-v debug=0xa")
+chkEq("pack uart interrupt parent", pack.uart.interruptParent, 4)
 
 func wordsMachine(_ words: [UInt32]) -> Machine {
     let m = Machine(onUart: { _ in }, onLog: { _ in }, definition: def)
@@ -214,7 +215,7 @@ do {
 }
 
 // MARK: ADT
-chkEq("ADT length", buildADT(pack).count, 4948)
+chkEq("ADT length", buildADT(pack).count, 4988)
 
 // MARK: kernel boot parity (needs the kernelcache path)
 if CommandLine.arguments.count > 1 {
@@ -230,27 +231,8 @@ if CommandLine.arguments.count > 1 {
         chk("boot chain completed", true)
         chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
-        if CommandLine.arguments.contains("trace") {
-            // Debug mode (temporary): full-register snapshots every 1M
-            // instructions from 50M to 100M, to bracket where a register
-            // value first diverges from the JS reference.
-            func snap(_ t: Int) {
-                var parts = ["R", String(t), String(m.pc, radix: 16), String(m.sp, radix: 16)]
-                for r in 0...30 { parts.append(String(m.x[r], radix: 16)) }
-                print(parts.joined(separator: " "))
-            }
-            m.run(50_000_000)
-            var t = 50_000_000
-            snap(t)
-            while t < 100_000_000 {
-                m.run(1_000_000)
-                t += 1_000_000
-                snap(t)
-            }
-            exit(0)
-        }
         // Parity trajectory, measured from the JS reference (frontiers
-        // 3-22 state) on 2026-11-26: the kernel executes past 200M
+        // 3-23 state) on 2026-11-26: the kernel executes past 200M
         // instructions with ZERO exceptions delivered. The checkpoints
         // pin the exact PC/SP at each 50M mark — a porting divergence
         // anywhere in the first 200M instructions moves at least one of
@@ -259,40 +241,44 @@ if CommandLine.arguments.count > 1 {
         // used to assert; those days are gone.)
         m.run(50_000_000)
         chkEq("icount at 50M", m.icount, 50_000_000)
-        chkEq("PC at 50M", m.pc, 0xFFFFFFF007B8814C)
+        chkEq("PC at 50M", m.pc, 0xFFFFFFF007B87AF0)
         chkEq("SP at 50M", m.sp, 0xFFFFFFF009C03D80)
         chkEq("exceptions at 50M", m.exceptions, 0)
         m.run(50_000_000)
         chkEq("icount at 100M", m.icount, 100_000_000)
-        chkEq("PC at 100M", m.pc, 0xFFFFFFF007B082E8)
-        chkEq("SP at 100M", m.sp, 0xFFFFFFE80438BA20)
+        chkEq("PC at 100M", m.pc, 0xFFFFFFF007B08B5C)
+        chkEq("SP at 100M", m.sp, 0xFFFFFFE8043AAA80)
         chkEq("exceptions at 100M", m.exceptions, 0)
         m.run(50_000_000)
         chkEq("icount at 150M", m.icount, 150_000_000)
-        chkEq("PC at 150M", m.pc, 0xFFFFFFF0080531E8)
-        chkEq("SP at 150M", m.sp, 0xFFFFFFE80438BA70)
+        chkEq("PC at 150M", m.pc, 0xFFFFFFF008056848)
+        chkEq("SP at 150M", m.sp, 0xFFFFFFE8043AAB20)
         chkEq("exceptions at 150M", m.exceptions, 0)
         m.run(50_000_000)
         chkEq("icount at 200M", m.icount, 200_000_000)
-        chkEq("PC at 200M", m.pc, 0xFFFFFFF00808FEA0)
-        chkEq("SP at 200M", m.sp, 0xFFFFFFE80438BAF0)
-        chkEq("X0 at 200M", m.x[0], 0xFFFFFFE199CFA238)
-        chkEq("X1 at 200M", m.x[1], 0xFFFFFFF0073BD5C1)
-        chkEq("X2 at 200M", m.x[2], 0x9)
-        chkEq("X3 at 200M", m.x[3], 0xFFFFFFFFFFFFFFF8)
-        chkEq("X7 at 200M", m.x[7], 0xA40)
-        chkEq("X8 at 200M", m.x[8], 0x1)
-        chkEq("X9 at 200M", m.x[9], 0xFFCFFFFF)
-        chkEq("X10 at 200M", m.x[10], 0)
-        chkEq("X11 at 200M", m.x[11], 1)
-        chkEq("X12 at 200M", m.x[12], 0x420001)
-        chkEq("exceptions at 200M", m.exceptions, 0)
+        chkEq("PC at 200M", m.pc, 0xFFFFFFF0081BA410)
+        chkEq("SP at 200M", m.sp, 0xFFFFFFE8043AB570)
+        chkEq("X0 at 200M", m.x[0], 0xFFFFFFF007044131)
+        chkEq("X1 at 200M", m.x[1], 0xFFFFFFF009BB7260)
+        chkEq("X2 at 200M", m.x[2], 0x10)
+        chkEq("X3 at 200M", m.x[3], 0xFFFFFFF009BB73F8)
+        chkEq("X5 at 200M", m.x[5], 0xFFFFFFF00703B894)
+        chkEq("X7 at 200M", m.x[7], 0xFFFFFFF00830C2C0)
+        chkEq("X9 at 200M", m.x[9], 0xFFFFFFF007801260)
+        chkEq("X10 at 200M", m.x[10], 0x2)
+        chkEq("X11 at 200M", m.x[11], 0)
+        chkEq("X12 at 200M", m.x[12], 0xBD87BD01)
+        // The frontier-23 reference takes its first delivered exception
+        // between 150M and 200M (the uart interrupt-parent change moved
+        // PE's serial path); the gate asserts the reference's count
+        // exactly, like every other checkpoint.
+        chkEq("exceptions at 200M", m.exceptions, 1)
         chkEq("status at 200M", m.status, "ready")
         chk("MMU on at 200M", m.mmuOn)
         // and it keeps executing cleanly past the gate point
         m.run(20_000_000)
         chkEq("icount at 220M", m.icount, 220_000_000)
-        chkEq("exceptions at 220M", m.exceptions, 0)
+        chkEq("exceptions at 220M", m.exceptions, 1)
         chkEq("status at 220M", m.status, "ready")
         // backdoor smoke on the booted machine
         let regs = core.backdoor("regs")
