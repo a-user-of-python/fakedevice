@@ -220,7 +220,7 @@ struct iPadRootView: View {
                 TextField("help", text: $consoleInput)
                     .font(.callout.monospaced())
                     .autocorrectionDisabled(true)
-                    .textInputAutocapitalization(.never)
+                    .fdNoAutocapitalization()
                     .onSubmit { submitConsole() }
                 Button("Run") { submitConsole() }
                     .buttonStyle(.bordered)
@@ -234,5 +234,18 @@ struct iPadRootView: View {
         let line = consoleInput
         consoleInput = ""
         vm.runBackdoor(line)
+    }
+}
+
+private extension View {
+    /// .textInputAutocapitalization exists only on iOS; this file also
+    /// compiles for macOS (same multiplatform target), so route through
+    /// a guarded helper.
+    @ViewBuilder func fdNoAutocapitalization() -> some View {
+        #if os(iOS)
+        self.textInputAutocapitalization(.never)
+        #else
+        self
+        #endif
     }
 }
