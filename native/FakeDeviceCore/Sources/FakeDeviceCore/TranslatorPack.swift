@@ -46,6 +46,7 @@ public struct TranslatorPack: Codable {
         public var size: String
         public var compatible: String
         public var interrupts: [UInt32]
+        public var interruptParent: UInt32
         public var phandle: UInt32
         public var registers: Registers
         public struct Registers: Codable { public var utrstat: String; public var utxh: String; public var urxh: String }
