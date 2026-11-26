@@ -209,16 +209,21 @@ if CommandLine.arguments.count > 1 {
         chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
         if CommandLine.arguments.contains("trace") {
-            // Debug mode (temporary): single-step trace across the
-            // 1,000-instruction segment where the Swift and JS trajectories
-            // diverge (69,534,000-69,535,000), PC after every step.
-            m.run(69_534_000)
-            var t = 69_534_000
-            print("S \(t) \(String(m.pc, radix: 16))")
-            while t < 69_535_000 {
-                _ = m.step()
-                t += 1
-                print("S \(t) \(String(m.pc, radix: 16))")
+            // Debug mode (temporary): full-register snapshots every 1M
+            // instructions from 50M to 69M, to bracket where a register
+            // value first diverges from the JS reference.
+            func snap(_ t: Int) {
+                var parts = ["R", String(t), String(m.pc, radix: 16), String(m.sp, radix: 16)]
+                for r in 0...30 { parts.append(String(m.x[r], radix: 16)) }
+                print(parts.joined(separator: " "))
+            }
+            m.run(50_000_000)
+            var t = 50_000_000
+            snap(t)
+            while t < 69_000_000 {
+                m.run(1_000_000)
+                t += 1_000_000
+                snap(t)
             }
             exit(0)
         }
