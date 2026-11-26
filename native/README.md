@@ -49,17 +49,30 @@ target (`SUPPORTED_PLATFORMS = iphoneos iphonesimulator macosx`):
 ## Everything is separate: kernel + translator pack
 
 The app is a shell + the Swift interpreter. It contains **no kernel**
-and **no machine definition**: on first open the user imports TWO
-files into the app's library —
+and **no machine definition**. Two files live in the app's library —
 
 1. an XNU **kernelcache** (the kernel image to run), and
-2. a **translator pack** (e.g. `../build/translator-pack-iphone11.json`):
+2. a **translator pack** (`../build/translator-pack-iphone11.json`):
    a JSON data file holding the whole machine definition — memory map,
    DRAM/kernel load bases, UART, CPU topology, device tree, and the
    boot_args field layout. The schema is documented field-by-field in
    `../build/PACK.md`; the Swift core takes every machine value from
    the loaded pack (`TranslatorPack.swift`), so web and native cannot
    drift. Boot and the self-test refuse to run until a pack is loaded.
+
+**First-run acquisition is fully autonomous** (`FirstRunFetcher.swift`):
+on first open with an incomplete library the app fetches both files
+itself, with progress in the Machine log. The pack downloads from this
+repo. The kernel is *extracted from Apple's own iOS 14.8 IPSW* with
+the technique proven in `../kernelcache/` (see its PROVENANCE.md):
+resolve the IPSW URL via the ipsw.me API, range-request only the
+kernelcache ZIP entry (~16 MB of the ~6 GB IPSW) from Apple's CDN,
+inflate, unwrap the IM4P, LZFSE-decompress via the Compression
+framework, and file it only after size (46,748,272) and SHA-256 match
+the known 14.8 build. Apple's binary travels Apple → device directly;
+it is never hosted by this project. Manual import of either file
+stays available as the alternative/fallback, and any acquisition
+failure is logged plainly — never faked as success.
 
 ## Wiring the core in
 

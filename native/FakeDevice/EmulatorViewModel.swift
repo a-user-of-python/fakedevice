@@ -29,6 +29,9 @@ final class EmulatorViewModel: ObservableObject {
     @Published var selectedPackID: PackFile.ID?
     /// Display name of the pack the core has actually loaded, if any.
     @Published var loadedPackName: String?
+    /// True while the autonomous first-run download is in flight.
+    @Published var isFetching: Bool = false
+    private var autoAcquireAttempted = false
 
     let core: EmulatorCore
     private let emuQueue = DispatchQueue(label: "fakedevice.emulator")
@@ -95,6 +98,7 @@ final class EmulatorViewModel: ObservableObject {
         if selectedKernelID == nil { selectedKernelID = kernels.first?.id }
         if selectedPackID == nil { selectedPackID = packs.first?.id }
         if loadedPackName == nil, let pack = selectedPack { applyPack(pack) }
+        maybeAutoAcquire()
     }
 
     /// Copy a picked file into Documents so it shows in the in-app list and
@@ -174,6 +178,60 @@ final class EmulatorViewModel: ObservableObject {
                 DispatchQueue.main.async { self.loadedPackName = name }
             } catch {
                 self.appendConsole("Translator pack failed to load: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    // MARK: - Autonomous first-run acquisition
+
+    /// On first open with an incomplete library, fetch whatever is
+    /// missing — once per launch, automatically. Failures are logged
+    /// plainly and the manual import UI stays as the fallback.
+    private func maybeAutoAcquire() {
+        guard !autoAcquireAttempted, !isFetching else { return }
+        guard packs.isEmpty || kernels.isEmpty else { return }
+        autoAcquireAttempted = true
+        appendLog("[setup] First run: the library is missing \(packs.isEmpty && kernels.isEmpty ? "the translator pack and the kernel" : (packs.isEmpty ? "a translator pack" : "the kernel")) — fetching automatically.")
+        fetchMissing()
+    }
+
+    /// Fetch whichever of the pack / kernel is missing (used by the
+    /// auto-run and by the cards' Download buttons).
+    func fetchMissing() {
+        runFetch(wantPack: packs.isEmpty, wantKernel: kernels.isEmpty)
+    }
+
+    func fetchPackOnly() { runFetch(wantPack: true, wantKernel: false) }
+    func fetchKernelOnly() { runFetch(wantPack: false, wantKernel: true) }
+
+    private func runFetch(wantPack: Bool, wantKernel: Bool) {
+        guard wantPack || wantKernel else { return }
+        guard !isFetching else { return }
+        isFetching = true
+        let dir = Self.documentsURL
+        Task { [weak self] in
+            guard let self else { return }
+            if wantPack {
+                do {
+                    _ = try await FirstRunFetcher.fetchPack(into: dir) { self.appendLog($0) }
+                    self.refreshKernels()
+                    if let pack = self.selectedPack { self.applyPack(pack) }
+                } catch {
+                    self.appendLog("[setup] Translator pack download FAILED: \(error.localizedDescription) — check the connection, or import a pack manually.")
+                }
+            }
+            if wantKernel {
+                do {
+                    let url = try await FirstRunFetcher.fetchKernel(into: dir) { self.appendLog($0) }
+                    self.refreshKernels()
+                    self.selectedKernelID = url
+                } catch {
+                    self.appendLog("[setup] Kernel download FAILED: \(error.localizedDescription) — check the connection, or import kernelcache.raw manually.")
+                }
+            }
+            self.isFetching = false
+            if !self.packs.isEmpty && !self.kernels.isEmpty {
+                self.appendLog("[setup] Setup complete — translator pack and kernel are in the library. Press \"Boot kernel\".")
             }
         }
     }

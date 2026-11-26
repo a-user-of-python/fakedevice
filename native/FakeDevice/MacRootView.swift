@@ -61,13 +61,16 @@ struct MacRootView: View {
             HStack {
                 Text("Translator pack").font(.headline)
                 Spacer()
-                Link("Download", destination: DownloadLinks.translatorPack)
+                Button("Download") { vm.fetchPackOnly() }
+                    .disabled(vm.isFetching)
                 Button("Import") { importingPack = true }
             }
             if vm.packs.isEmpty {
-                Text("No translator pack yet. Download translator-pack-iphone11.json (this project's own data file) and import it — the app ships without a machine definition; the pack is the fake hardware (memory map, UART, CPUs, device tree), as data.")
+                Text("No translator pack yet. On first open the app downloads it automatically; Download fetches it again. The app ships without a machine definition — the pack is the fake hardware (memory map, UART, CPUs, device tree), as data.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                Link("Fallback: the pack file in the project repo", destination: DownloadLinks.translatorPack)
+                    .font(.caption)
             } else {
                 List {
                     ForEach(vm.packs) { file in
@@ -109,13 +112,16 @@ struct MacRootView: View {
             HStack {
                 Text("Kernel files").font(.headline)
                 Spacer()
-                Link("Get from Apple", destination: DownloadLinks.kernelFirmwareListing)
+                Button("Download") { vm.fetchKernelOnly() }
+                    .disabled(vm.isFetching)
                 Button("Import") { importing = true }
             }
             if vm.kernels.isEmpty {
-                Text("No kernel files yet. The kernel is Apple's binary and is never hosted by this project: download the iPhone 11 (iPhone12,1) iOS 14.8 IPSW from Apple's servers via the ipsw.me listing, extract kernelcache.raw from it, and import it here — it is copied into this app's Documents folder.")
+                Text("No kernel files yet. On first open the app extracts the kernelcache itself (~16 MB) straight from Apple's iOS 14.8 IPSW and verifies its SHA-256 — the kernel is Apple's binary, travels from Apple's servers to this Mac, and is never hosted by this project. Download retries; Import adds a file manually.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                Link("Fallback: Apple's firmware listing on ipsw.me", destination: DownloadLinks.kernelFirmwareListing)
+                    .font(.caption)
             } else {
                 List {
                     ForEach(vm.kernels) { file in
@@ -153,6 +159,11 @@ struct MacRootView: View {
             Text("A fake device running a real XNU kernel, interpreted natively on this Mac. The machine itself comes from the translator pack above.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+            if vm.isFetching {
+                Text("Downloading the setup files — progress is in the Machine log.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             HStack(spacing: 10) {
                 Button("Run self-test") { vm.runSelfTest() }
                     .buttonStyle(.bordered)
