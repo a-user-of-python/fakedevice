@@ -208,6 +208,20 @@ if CommandLine.arguments.count > 1 {
         chk("boot chain completed", true)
         chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
+        if CommandLine.arguments.contains("trace") {
+            // Debug mode (temporary): print the PC every 1,000 instructions
+            // across the 60M-70M window so a divergence from the reference
+            // can be bracketed against the same trace from the JS core.
+            m.run(60_000_000)
+            var t = 60_000_000
+            print("T \(t) \(String(m.pc, radix: 16))")
+            while t < 70_000_000 {
+                m.run(1_000)
+                t += 1_000
+                print("T \(t) \(String(m.pc, radix: 16))")
+            }
+            exit(0)
+        }
         // Parity trajectory, measured from the JS reference (frontiers
         // 3-20 state, STAGE5-LOG frontier 20) on 2026-11-26: the kernel
         // executes past 200M instructions with ZERO exceptions delivered.
