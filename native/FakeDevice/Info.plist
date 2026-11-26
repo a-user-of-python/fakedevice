@@ -27,6 +27,17 @@
 	</dict>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<!-- Full-screen fix (0.1.2): the app previously declared NO launch
+	     screen at all — no UILaunchStoryboardName, no UILaunchScreen,
+	     no storyboard in the project — so iPadOS treated it as a
+	     legacy app and presented it letterboxed at a fixed size with
+	     black bars on both sides instead of the display's native
+	     resolution. Declaring a launch screen opts the app into the
+	     full native display size in both orientations. -->
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>

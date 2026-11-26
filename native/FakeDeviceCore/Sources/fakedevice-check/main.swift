@@ -225,5 +225,8 @@ if CommandLine.arguments.count > 1 {
     print("note: no kernelcache path argument — kernel boot parity checks skipped")
 }
 
+// MARK: inflate (PuffInflate — the fetcher's DEFLATE decoder)
+runInflateTests()
+
 print("fakedevice-check: \(pass) passed, \(fail) failed")
 exit(fail == 0 ? 0 : 1)

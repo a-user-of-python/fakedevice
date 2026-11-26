@@ -25,10 +25,22 @@
 // unwraps, no unchecked subscripts, and no unbounded reads anywhere in
 // the fetch / parse / decode path — every byte read is bounds-checked
 // and every failure surfaces as a thrown FetcherError. (0.1.0 crashed
-// on launch: inflateRawDeflate built its compression_stream with
+// on launch: its inflate built its compression_stream with
 // UnsafeMutablePointer(bitPattern: 0)! — a force unwrap of nil — so
 // the app died the moment the kernelcache download finished and the
 // inflate step began.)
+//
+// 0.1.2: the ZIP-entry inflate no longer uses the Compression
+// framework at all. 0.1.1 drove COMPRESSION_ZLIB with a hand-made
+// 2-byte zlib header prepended to the raw deflate stream; on a real
+// iPad that decoder reported an error on the genuine stream (after
+// range fetch, ZIP parse, and the full 16 MB download had all worked)
+// and the kernel fetch failed at its last step. The entry is now
+// inflated by PuffInflate (FakeDeviceCore) — a self-contained
+// pure-Swift port of puff.c with no stream framing to get wrong,
+// execution-proven in CI by fakedevice-check on stored, fixed-, and
+// dynamic-Huffman streams. The Compression framework is still used
+// for exactly one thing: LZFSE, which has no framing ambiguity.
 
 import Foundation
 import Compression
@@ -149,7 +161,12 @@ struct FirstRunFetcher {
         let im4p: Data
         switch entry.method {
         case 0: im4p = compressed
-        case 8: im4p = try inflateRawDeflate(compressed, expectedSize: entry.usize)
+        case 8:
+            do {
+                im4p = try PuffInflate.inflate(compressed, expectedSize: entry.usize)
+            } catch let error as PuffInflate.InflateError {
+                throw FetcherError.badData("the deflate decoder reported an error (\(error)) — check the connection, or import \(kernelFileName) manually")
+            }
         default: throw FetcherError.badData("unsupported ZIP method \(entry.method) for the kernelcache entry")
         }
         guard im4p.count == entry.usize else {
@@ -306,74 +323,12 @@ struct FirstRunFetcher {
         return (entries, nTotal)
     }
 
-    // MARK: - Raw deflate via the Compression framework
+    // MARK: - Raw deflate
     //
-    // COMPRESSION_ZLIB speaks RFC 1950 (zlib); a ZIP entry is RFC 1951
-    // (raw deflate). The deflate payload is identical — prepend the
-    // 2-byte zlib header and stop as soon as the expected byte count
-    // has been produced (before the trailing adler check matters).
-
-    private static func inflateRawDeflate(_ data: Data, expectedSize: Int) throws -> Data {
-        guard expectedSize > 0, expectedSize <= 256_000_000 else {
-            throw FetcherError.badData("implausible deflate output size \(expectedSize)")
-        }
-        var out = Data()
-        out.reserveCapacity(expectedSize)
-        // The stream must start with valid-but-unused pointers: the
-        // Compression overlay declares the pointer fields
-        // non-optional, so nil literals do not compile, and there is
-        // no zero-argument initializer. Point both fields at a
-        // scratch byte with size 0 — compression_stream_init resets
-        // the stream, and real buffers are assigned before every
-        // process call. (0.1.0 built the stream with
-        // UnsafeMutablePointer(bitPattern: 0)! — that initializer
-        // returns nil for address 0, so the force unwrap crashed the
-        // app the moment this function ran.)
-        var scratchDst: UInt8 = 0
-        var scratchSrc: UInt8 = 0
-        var stream = compression_stream(dst_ptr: &scratchDst,
-                                        dst_size: 0,
-                                        src_ptr: &scratchSrc,
-                                        src_size: 0,
-                                        state: nil)
-        guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
-            throw FetcherError.badData("could not start the deflate decoder")
-        }
-        defer { compression_stream_destroy(&stream) }
-        var src = [UInt8](data)
-        src.insert(contentsOf: [0x78, 0x01], at: 0)
-        let cap = 1 << 20
-        var dst = [UInt8](repeating: 0, count: cap)
-        var failed = false
-        var ended = false
-        src.withUnsafeBufferPointer { srcBuf in
-            guard let srcBase = srcBuf.baseAddress else { failed = true; return }
-            stream.src_ptr = srcBase
-            stream.src_size = srcBuf.count
-            while out.count < expectedSize {
-                var produced = 0
-                var status: compression_status = COMPRESSION_STATUS_OK
-                dst.withUnsafeMutableBufferPointer { dstBuf in
-                    guard let dstBase = dstBuf.baseAddress else { failed = true; return }
-                    stream.dst_ptr = dstBase
-                    stream.dst_size = dstBuf.count
-                    status = compression_stream_process(&stream, 0)
-                    produced = dstBuf.count - stream.dst_size
-                }
-                if produced > 0 { out.append(contentsOf: dst[0..<produced]) }
-                if status == COMPRESSION_STATUS_ERROR { failed = true }
-                if status == COMPRESSION_STATUS_END { ended = true }
-                if failed || ended || produced == 0 { break }
-            }
-        }
-        guard !failed else {
-            throw FetcherError.badData("the deflate decoder reported an error")
-        }
-        guard out.count == expectedSize else {
-            throw FetcherError.badData("deflate produced \(out.count) bytes, want \(expectedSize)")
-        }
-        return out
-    }
+    // Inflated by PuffInflate (FakeDeviceCore/Inflate.swift), a
+    // self-contained pure-Swift port of puff.c — see the 0.1.2 note
+    // at the top of this file for why the Compression framework's
+    // zlib decoder is no longer used for ZIP entries.
 
     // MARK: - IM4P unwrap (DER walk, mirrors the proven python)
 

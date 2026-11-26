@@ -14,6 +14,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "FakeDeviceCore"),
-        .executableTarget(name: "fakedevice-check", dependencies: ["FakeDeviceCore"]),
+        .executableTarget(name: "fakedevice-check", dependencies: ["FakeDeviceCore"],
+                          resources: [.copy("TestData/deflate-fixture-8m.bin")]),
     ]
 )
