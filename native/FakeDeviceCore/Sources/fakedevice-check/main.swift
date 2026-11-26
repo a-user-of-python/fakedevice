@@ -6,7 +6,7 @@
 //   sdiv        — the reference's SDIV semantics (probe-verified against JS)
 //   simd        — test_simd.mjs's 30 checks on the same program bytes
 //   mul         — test_mul.mjs's 14 checks on the same program bytes
-//   adt         — buildADT length is 4,148 bytes, like the reference
+//   adt         — buildADT length is 4,852 bytes, like the reference
 //   kernel boot — with a kernelcache path argument: the Swift core must
 //                 track the reference's exact trajectory, measured from
 //                 the JS core the same day (the boot frontier moves as
@@ -75,6 +75,23 @@ chkEq("pack lock-regs ctrr-a page size shift", pack.lockRegs.ctrrA.pageSizeShift
 chkEq("pack lock-regs ctrr-a lower limit", pack.lockRegs.ctrrA.lowerLimit, "0x800000000")
 chkEq("pack lock-regs ctrr-a upper limit", pack.lockRegs.ctrrA.upperLimit, "0x900000000")
 chkEq("pack lock-regs ctrr-a regs count", pack.lockRegs.ctrrA.regs.count, 5)
+// Frontier 21: the AIC + timer nodes and the phandle web around them.
+chkEq("pack uart phandle", pack.uart.phandle, 3)
+chkEq("pack arm-io phandle", pack.armIo.phandle, 2)
+chkEq("pack arm-io interrupt parent", pack.armIo.interruptParent, 4)
+chkEq("pack aic name", pack.aic.name, "aic")
+chkEq("pack aic compatible", pack.aic.compatible, "aic,1")
+chkEq("pack aic reg offset", pack.aic.regOffset, "0x3B100000")
+chkEq("pack aic reg size", pack.aic.regSize, "0x8000")
+chkEq("pack aic interrupt-controller value", pack.aic.interruptControllerValue, "master")
+chkEq("pack aic interrupt cells", pack.aic.interruptCells, 3)
+chkEq("pack aic version", pack.aic.aicVersion, 1)
+chkEq("pack aic phandle", pack.aic.phandle, 4)
+chkEq("pack timer name", pack.timer.name, "timer")
+chkEq("pack timer compatible", pack.timer.compatible, "timer,arm")
+chkEq("pack timer reg offset", pack.timer.regOffset, "0x3B200000")
+chkEq("pack timer reg size", pack.timer.regSize, "0x8000")
+chkEq("pack timer phandle", pack.timer.phandle, 5)
 
 func wordsMachine(_ words: [UInt32]) -> Machine {
     let m = Machine(onUart: { _ in }, onLog: { _ in }, definition: def)
@@ -192,7 +209,7 @@ do {
 }
 
 // MARK: ADT
-chkEq("ADT length", buildADT(pack).count, 4148)
+chkEq("ADT length", buildADT(pack).count, 4852)
 
 // MARK: kernel boot parity (needs the kernelcache path)
 if CommandLine.arguments.count > 1 {
@@ -208,62 +225,37 @@ if CommandLine.arguments.count > 1 {
         chk("boot chain completed", true)
         chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
-        if CommandLine.arguments.contains("trace") {
-            // Debug mode (temporary): full-register snapshots every 1M
-            // instructions from 50M to 69M, to bracket where a register
-            // value first diverges from the JS reference.
-            func snap(_ t: Int) {
-                var parts = ["R", String(t), String(m.pc, radix: 16), String(m.sp, radix: 16)]
-                for r in 0...30 { parts.append(String(m.x[r], radix: 16)) }
-                print(parts.joined(separator: " "))
-            }
-            m.run(50_000_000)
-            var t = 50_000_000
-            snap(t)
-            while t < 69_000_000 {
-                m.run(1_000_000)
-                t += 1_000_000
-                snap(t)
-            }
-            exit(0)
-        }
         // Parity trajectory, measured from the JS reference (frontiers
-        // 3-20 state, STAGE5-LOG frontier 20) on 2026-11-26: the kernel
-        // executes past 200M instructions with ZERO exceptions delivered.
-        // The checkpoints pin the exact PC at each 50M mark — a porting
-        // divergence anywhere in the first 200M instructions moves at
-        // least one of them. (The pre-sync frontier-3 endpoint — first
-        // exception at 17,723,144, park at 0xFFFFFFF0081BA410 — is what
-        // the stale core used to assert; those days are gone.)
+        // 3-21 state) on 2026-11-26: the kernel executes past 200M
+        // instructions with ZERO exceptions delivered. The checkpoints
+        // pin the exact PC/SP at each 50M mark — a porting divergence
+        // anywhere in the first 200M instructions moves at least one of
+        // them. (The pre-sync frontier-3 endpoint — first exception at
+        // 17,723,144, park at 0xFFFFFFF0081BA410 — is what the stale core
+        // used to assert; those days are gone.)
         m.run(50_000_000)
         chkEq("icount at 50M", m.icount, 50_000_000)
-        chkEq("PC at 50M", m.pc, 0xFFFFFFF007B87B04)
+        chkEq("PC at 50M", m.pc, 0xFFFFFFF007B882F4)
         chkEq("SP at 50M", m.sp, 0xFFFFFFF009C03D80)
         chkEq("exceptions at 50M", m.exceptions, 0)
-        m.run(10_000_000)
-        chkEq("PC at 60M", m.pc, 0xFFFFFFF007B88148)
-        m.run(10_000_000)
-        chkEq("PC at 70M", m.pc, 0xFFFFFFF007BB9B8C)
-        m.run(10_000_000)
-        chkEq("PC at 80M", m.pc, 0xFFFFFFF007BD1590)
-        m.run(10_000_000)
-        chkEq("PC at 90M", m.pc, 0xFFFFFFF0081C1D9C)
-        m.run(10_000_000)
+        m.run(50_000_000)
         chkEq("icount at 100M", m.icount, 100_000_000)
-        chkEq("PC at 100M", m.pc, 0xFFFFFFF008090030)
+        chkEq("PC at 100M", m.pc, 0xFFFFFFF007B0A69C)
+        chkEq("SP at 100M", m.sp, 0xFFFFFFE8046E3A90)
         chkEq("exceptions at 100M", m.exceptions, 0)
         m.run(50_000_000)
         chkEq("icount at 150M", m.icount, 150_000_000)
-        chkEq("PC at 150M", m.pc, 0xFFFFFFF00808FFF8)
+        chkEq("PC at 150M", m.pc, 0xFFFFFFF007AAFEFC)
+        chkEq("SP at 150M", m.sp, 0xFFFFFFE8046E3A50)
         chkEq("exceptions at 150M", m.exceptions, 0)
         m.run(50_000_000)
         chkEq("icount at 200M", m.icount, 200_000_000)
-        chkEq("PC at 200M", m.pc, 0xFFFFFFF007BD164C)
-        chkEq("SP at 200M", m.sp, 0xFFFFFFE80488BA90)
-        chkEq("X0 at 200M", m.x[0], 0xFFFFFFE4CD4191A0)
+        chkEq("PC at 200M", m.pc, 0xFFFFFFF00808FE84)
+        chkEq("SP at 200M", m.sp, 0xFFFFFFE8046E3AF0)
+        chkEq("X0 at 200M", m.x[0], 0xFFFFFFE19A033AF8)
         chkEq("X1 at 200M", m.x[1], 0x10)
-        chkEq("X7 at 200M", m.x[7], 0x850)
-        chkEq("X8 at 200M", m.x[8], 0x220000)
+        chkEq("X7 at 200M", m.x[7], 0xA40)
+        chkEq("X8 at 200M", m.x[8], 0x1)
         chkEq("X9 at 200M", m.x[9], 0xFFCFFFFF)
         chkEq("X10 at 200M", m.x[10], 1)
         chkEq("X11 at 200M", m.x[11], 1)
