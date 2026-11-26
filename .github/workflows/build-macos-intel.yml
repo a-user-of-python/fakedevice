@@ -1,0 +1,173 @@
+name: Build macOS (Intel x86_64)
+
+# FakeDevice for Mac (Intel), built on standard free runners only.
+#
+# The primary target machine for this lane is a 2019 16" Intel MacBook
+# Pro, so the x86_64 slice is a first-class deliverable. The emulator core is native Swift
+# (FakeDeviceCore) compiled for x86_64 — there is no JavaScript layer in
+# the native apps, so Intel performance is plain compiled-Swift speed.
+#
+# Jobs:
+#   build-macos-intel  — macos-26-intel (STANDARD GitHub-hosted runner:
+#                        4-core Intel, macOS 26, free on public repos; the
+#                        larger Intel label is macos-26-large and is NOT
+#                        used). Builds the app's x86_64 slice NATIVELY on
+#                        Intel and verifies it with lipo.
+#   universal-check    — macos-26 (arm64): builds the shipping universal
+#                        binary and proves with lipo that it really
+#                        contains BOTH arm64 and x86_64 slices.
+#   core-smoke-intel   — macos-26-intel: builds the FakeDeviceCore
+#                        package's headless `fakedevice-check` harness
+#                        natively on Intel and runs it (the port's
+#                        self-test must print "test" / "55" through the
+#                        fake UART and reproduce the reference boot
+#                        results). This job activates automatically once
+#                        native/FakeDeviceCore/Package.swift lands; until
+#                        then it is skipped, visibly, in the run.
+#
+# Unsigned CI builds (CODE_SIGNING_ALLOWED=NO), same as the other lanes.
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "native/**"
+      - ".github/workflows/build-macos-intel.yml"
+
+jobs:
+  build-macos-intel:
+    name: macOS app (x86_64, native Intel)
+    runs-on: macos-26-intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm this runner is really Intel
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64"
+          uname -a
+          sysctl -n machdep.cpu.brand_string
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build FakeDevice for macOS x86_64 (native Intel)
+        run: |
+          set -euo pipefail
+          xcodebuild -project native/FakeDevice.xcodeproj \
+            -scheme FakeDevice \
+            -configuration Release \
+            -destination 'platform=macOS,arch=x86_64' \
+            -derivedDataPath build/dd-intel \
+            ARCHS=x86_64 \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Verify the built app is x86_64
+        run: |
+          set -euo pipefail
+          APP_PATH="build/dd-intel/Build/Products/Release/FakeDevice.app"
+          test -d "$APP_PATH"
+          BIN="$APP_PATH/Contents/MacOS/FakeDevice"
+          test -x "$BIN"
+          file "$BIN"
+          lipo -info "$BIN"
+          lipo -info "$BIN" | grep -q "x86_64"
+          PLIST="$APP_PATH/Contents/Info.plist"
+          python3 - "$PLIST" <<'EOF'
+          import plistlib, sys
+          with open(sys.argv[1], "rb") as f:
+              p = plistlib.load(f)
+          bundle = p.get("CFBundleIdentifier")
+          print("bundle id:", bundle)
+          assert bundle == "com.user.fakedevice", bundle
+          print("Info.plist verification OK")
+          EOF
+          for js in emu.js boot.js bridge.js; do
+            if find "$APP_PATH" -name "$js" | grep -q .; then
+              echo "ERROR: $js found inside the app — the native build must use the Swift core, not bundled JS"
+              exit 1
+            fi
+          done
+          echo "no bundled JS emulator core — OK"
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: FakeDevice-macOS-x86_64
+          path: build/dd-intel/Build/Products/Release/FakeDevice.app
+
+  universal-check:
+    name: Universal binary contains arm64 + x86_64
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build FakeDevice universal (arm64 + x86_64)
+        run: |
+          set -euo pipefail
+          xcodebuild -project native/FakeDevice.xcodeproj \
+            -scheme FakeDevice \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath build/dd-universal \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Verify both slices are present with lipo
+        run: |
+          set -euo pipefail
+          BIN="build/dd-universal/Build/Products/Release/FakeDevice.app/Contents/MacOS/FakeDevice"
+          test -x "$BIN"
+          file "$BIN"
+          lipo -info "$BIN"
+          lipo -info "$BIN" | grep -q "arm64"
+          lipo -info "$BIN" | grep -q "x86_64"
+          echo "universal binary verified: arm64 + x86_64"
+
+      - name: Upload app
+        uses: actions/upload-artifact@v4
+        with:
+          name: FakeDevice-macOS-universal
+          path: build/dd-universal/Build/Products/Release/FakeDevice.app
+
+  core-smoke-intel:
+    name: Core smoke test (x86_64, native Intel)
+    runs-on: macos-26-intel
+    # Activates once the FakeDeviceCore SwiftPM package lands in the repo.
+    if: ${{ hashFiles('native/FakeDeviceCore/Package.swift') != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm this runner is really Intel
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64"
+          uname -a
+
+      - name: Build fakedevice-check natively (x86_64)
+        run: |
+          set -euo pipefail
+          swift build \
+            --package-path native/FakeDeviceCore \
+            -c release \
+            --product fakedevice-check
+          CHECK="native/FakeDeviceCore/.build/release/fakedevice-check"
+          test -x "$CHECK"
+          file "$CHECK"
+          lipo -info "$CHECK" | grep -q "x86_64"
+
+      - name: Run fakedevice-check natively on Intel
+        run: |
+          set -euo pipefail
+          native/FakeDeviceCore/.build/release/fakedevice-check
