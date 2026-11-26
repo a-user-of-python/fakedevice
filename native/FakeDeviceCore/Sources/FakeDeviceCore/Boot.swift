@@ -84,12 +84,27 @@ private func adtProp(_ name: String, _ value: [UInt8]) -> [UInt8] {
     if pad > 0 { out += [UInt8](repeating: 0, count: pad) }
     return out
 }
-private func adtU32(_ v: UInt32) -> [UInt8] {   // cells are big-endian
-    [UInt8((v >> 24) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF)]
+// ADT integer property values are stored LITTLE-ENDIAN, in the machine's
+// native format — NOT the FDT/OpenFirmware big-endian cell format. Proven
+// from the kernel's own consumers (stage-5 frontier 3): XNU's ml_readprop()
+// raw-loads a uint32_t/uint64_t from the property bytes, ml_read_reg_range()
+// raw-loads a uint64_t pair, and pe_arm_get_soc_base_phys() reads the arm-io
+// "ranges" property as a uintptr_t array whose element [1] is the SoC base.
+private func adtU32(_ v: UInt32) -> [UInt8] {
+    [UInt8(v & 0xFF), UInt8((v >> 8) & 0xFF), UInt8((v >> 16) & 0xFF), UInt8((v >> 24) & 0xFF)]
+}
+private func adtU64(_ v: UInt64) -> [UInt8] {
+    (0..<8).map { UInt8((v >> (8 * $0)) & 0xFF) }
 }
 private func adtStr(_ s: String) -> [UInt8] { Array(s.utf8) + [0] }
 private func adtReg(_ addr: UInt64, _ size: UInt64) -> [UInt8] {
-    adtU32(UInt32(addr >> 32)) + adtU32(UInt32(addr & 0xFFFFFFFF)) + adtU32(UInt32(size >> 32)) + adtU32(UInt32(size & 0xFFFFFFFF))
+    // A "reg" property is exactly two little-endian uint64s: (address, size)
+    adtU64(addr) + adtU64(size)
+}
+private func adtRanges(_ list: [TranslatorPack.ArmIo.Range]) -> [UInt8] {
+    // A "ranges" property is an array of little-endian uint64 triplets
+    // (childAddress, parentAddress, size)
+    list.flatMap { adtU64(TranslatorPack.hex($0.childAddress)) + adtU64(TranslatorPack.hex($0.parentAddress)) + adtU64(TranslatorPack.hex($0.size)) }
 }
 private func adtNode(_ name: String, _ props: [[UInt8]], _ children: [[UInt8]]) -> [UInt8] {
     let allProps = [adtProp("name", adtStr(name))] + props
@@ -103,25 +118,66 @@ private func adtNode(_ name: String, _ props: [[UInt8]], _ children: [[UInt8]]) 
 }
 
 public func buildADT(_ pack: TranslatorPack) -> [UInt8] {
+    // A child device's ADT "reg" address is an OFFSET within its parent
+    // bus: the kernel computes the physical address as socBase + reg[0],
+    // where socBase is ranges[1] of the arm-io node. pack.uart.base is the
+    // full physical address, so the tree stores base - armIoBase.
+    let uartRegOffset = pack.uartBase &- TranslatorPack.hex(pack.armIo.regAddress)
     let uart0 = adtNode(pack.uart.name, [
         adtProp("compatible", adtStr(pack.uart.compatible)),
-        adtProp("reg", adtReg(pack.uartBase, pack.uartSize)),
+        adtProp("reg", adtReg(uartRegOffset, pack.uartSize)),
         adtProp("interrupts", pack.uart.interrupts.flatMap { adtU32($0) }),
     ], [])
-    var armIoProps: [[UInt8]] = [
+    let armIoProps: [[UInt8]] = [
         adtProp("compatible", adtStr(pack.armIo.compatible)),
         adtProp("device_type", adtStr(pack.armIo.deviceType)),
         adtProp("#address-cells", adtU32(pack.armIo.addressCells)),
         adtProp("#size-cells", adtU32(pack.armIo.sizeCells)),
         adtProp("reg", adtReg(TranslatorPack.hex(pack.armIo.regAddress), TranslatorPack.hex(pack.armIo.regSize))),
+        adtProp("ranges", adtRanges(pack.armIo.ranges)),
     ]
-    if pack.armIo.rangesEmpty { armIoProps.append(adtProp("ranges", [])) }
     let armIo = adtNode(pack.armIo.name, armIoProps, [uart0])
+    // /chosen/lock-regs: real iBoot describes the hardware lock apertures
+    // here; the kernel's lock-regs init panics if the node, its "amcc"
+    // child, or the amcc property set is missing (stage-5 frontier 14).
+    // The kernel's reader fetches each named register as a
+    // <name>-reg-offset / -reg-mask / -reg-value u32 triplet.
+    func regProps(_ regs: [TranslatorPack.LockRegs.Reg]) -> [[UInt8]] {
+        regs.flatMap { r -> [[UInt8]] in
+            var ps = [adtProp(r.name + "-reg-offset", adtU32(r.offset)),
+                      adtProp(r.name + "-reg-mask", adtU32(r.mask))]
+            if let value = r.value { ps.append(adtProp(r.name + "-reg-value", adtU32(value))) }
+            return ps
+        }
+    }
+    let lr = pack.lockRegs
+    let ctrrA = adtNode(lr.ctrrA.name, [
+        adtProp("page-size-shift", adtU32(lr.ctrrA.pageSizeShift)),
+        adtProp("lower-limit", adtU64(TranslatorPack.hex(lr.ctrrA.lowerLimit))),
+        adtProp("upper-limit", adtU64(TranslatorPack.hex(lr.ctrrA.upperLimit))),
+        adtProp("lock", adtU32(lr.ctrrA.lock)),
+        adtProp("enable", adtU32(lr.ctrrA.enable)),
+        adtProp("write-disable", adtU32(lr.ctrrA.writeDisable)),
+    ] + regProps(lr.ctrrA.regs), [])
+    let amcc = adtNode(lr.amcc.name, [
+        adtProp("aperture-count", adtU32(lr.amcc.apertureCount)),
+        adtProp("aperture-size", adtU32(UInt32(TranslatorPack.hex(lr.amcc.apertureSize)))),
+        adtProp("plane-count", adtU32(lr.amcc.planeCount)),
+        adtProp("plane-stride", adtU32(lr.amcc.planeStride)),
+        adtProp("aperture-phys-addr", lr.amcc.aperturePhysAddr.flatMap { adtU64(TranslatorPack.hex($0)) }),
+        adtProp("cache-status", adtU32(lr.amcc.cacheStatus)),
+    ] + regProps(lr.amcc.regs), [ctrrA])
+    let lockRegs = adtNode(lr.name, [], [amcc])
     // /chosen/random-seed: real iBoot fills this from the hardware RNG; the
     // pack carries a fixed seed so runs stay deterministic.
     let chosen = adtNode(pack.deviceTree.chosenNodeName, [
         adtProp("random-seed", pack.randomSeed),
-    ], [])
+        // arm_init() reads gDramBase/gDramSize from these two /chosen
+        // properties (raw uint64 loads) and panics if either is missing —
+        // real iBoot always supplies them (stage-5 frontier 4).
+        adtProp("dram-base", adtU64(pack.dramBase)),
+        adtProp("dram-size", adtU64(pack.dramSize)),
+    ], [lockRegs])
     let memory = adtNode(pack.deviceTree.memoryNodeName, [
         adtProp("reg", adtReg(pack.dramBase, pack.dramSize)),
     ], [])
