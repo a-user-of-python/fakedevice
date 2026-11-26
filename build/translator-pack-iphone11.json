@@ -153,6 +153,7 @@
       81,
       0
     ],
+    "interruptParent": 4,
     "name": "uart0",
     "phandle": 3,
     "registers": {
