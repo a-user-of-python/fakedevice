@@ -32,20 +32,34 @@ target (`SUPPORTED_PLATFORMS = iphoneos iphonesimulator macosx`):
 - `FakeDevice/` — the app: `FakeDeviceApp.swift` (entry),
   `ContentView.swift` (picks the platform layout), `MacRootView.swift`,
   `iPadRootView.swift`, `EmulatorViewModel.swift` (chunked run loop,
-  Documents kernel library, backdoor plumbing), `EmulatorCore.swift`
-  (the `EmulatorCore` protocol + `EmulatorStatus` contract, plus a
-  clearly-labelled `CorePendingPlaceholder` used only until the real
-  core is wired in), `GlassCard.swift`, `Assets.xcassets`.
+  Documents libraries for kernels AND translator packs, backdoor
+  plumbing), `GlassCard.swift`, `Assets.xcassets`. The `EmulatorCore`
+  protocol + `EmulatorStatus` contract live in the core package (below).
 - `FakeDeviceCore/` — the Swift port of the emulator (SwiftPM package):
   the ARM64 interpreter, page-table walker, boot chain, and backdoor,
   plus `fakedevice-check`, a headless harness that proves the port
   against the reference implementation's known results. The app target
   compiles the core's sources directly; the package exists so the core
   can be built and checked without Xcode. Verified 2026-11-26:
-  fakedevice-check passes 73/73, including booting the real kernelcache
-  to the reference's exact endpoint (first exception delivered at
-  instruction 9,261,731 with identical ESR/FAR/ELR/SPSR; kernel parked
-  at 0xFFFFFFF0081BA410).
+  fakedevice-check passes 82/82, including booting the real kernelcache
+  to the reference's exact current endpoint (first exception — an
+  undefined instruction — delivered at instruction 17,723,144 with
+  identical ESR/FAR/ELR/SPSR; kernel parked at 0xFFFFFFF0081BA410).
+
+## Everything is separate: kernel + translator pack
+
+The app is a shell + the Swift interpreter. It contains **no kernel**
+and **no machine definition**: on first open the user imports TWO
+files into the app's library —
+
+1. an XNU **kernelcache** (the kernel image to run), and
+2. a **translator pack** (e.g. `../build/translator-pack-iphone11.json`):
+   a JSON data file holding the whole machine definition — memory map,
+   DRAM/kernel load bases, UART, CPU topology, device tree, and the
+   boot_args field layout. The schema is documented field-by-field in
+   `../build/PACK.md`; the Swift core takes every machine value from
+   the loaded pack (`TranslatorPack.swift`), so web and native cannot
+   drift. Boot and the self-test refuse to run until a pack is loaded.
 
 ## Wiring the core in
 

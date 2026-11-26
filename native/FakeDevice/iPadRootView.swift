@@ -9,6 +9,7 @@ struct iPadRootView: View {
     @StateObject private var vm: EmulatorViewModel
     @State private var consoleInput: String = ""
     @State private var importing: Bool = false
+    @State private var importingPack: Bool = false
     @State private var portraitPane: Pane = .log
 
     enum Pane: String, CaseIterable, Identifiable {
@@ -37,6 +38,13 @@ struct iPadRootView: View {
                 vm.importKernel(from: url)
             }
         }
+        .fileImporter(isPresented: $importingPack,
+                      allowedContentTypes: [.json],
+                      allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                vm.importPack(from: url)
+            }
+        }
         .onAppear { vm.refreshKernels() }
     }
 
@@ -45,6 +53,7 @@ struct iPadRootView: View {
     private var landscape: some View {
         HStack(alignment: .top, spacing: 12) {
             VStack(spacing: 12) {
+                packCard
                 libraryCard
                 controlsCard
                 statusCard
@@ -86,6 +95,8 @@ struct iPadRootView: View {
                 consolePane
             }
 
+            packCard
+                .frame(maxHeight: 200)
             libraryCard
                 .frame(maxHeight: 220)
         }
@@ -93,6 +104,53 @@ struct iPadRootView: View {
     }
 
     // MARK: - Cards
+
+    private var packCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Translator pack").font(.headline)
+                Spacer()
+                Button("Import") { importingPack = true }
+            }
+            if vm.packs.isEmpty {
+                Text("No translator pack yet. Import translator-pack-iphone11.json, or drop it into this app's folder in Files — the app ships without a machine definition; the pack is the fake hardware, as data.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                List {
+                    ForEach(vm.packs) { file in
+                        Button {
+                            vm.selectPack(file)
+                        } label: {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(file.name).font(.callout).lineLimit(1)
+                                    Text(file.sizeText).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if vm.selectedPackID == file.id {
+                                    Image(systemName: "checkmark.circle.fill")
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .swipeActions {
+                            Button("Delete", role: .destructive) { vm.deletePack(file) }
+                        }
+                    }
+                }
+                .listStyle(.plain)
+                .frame(minHeight: 44)
+                if let loaded = vm.loadedPackName {
+                    Text("Loaded: \(loaded)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(12)
+        .glassCard()
+    }
 
     private var libraryCard: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -139,7 +197,7 @@ struct iPadRootView: View {
     private var controlsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("FakeDevice").font(.title2.bold())
-            Text("A fake iPhone (t8030) running the real iOS kernel, interpreted natively on this iPad.")
+            Text("A fake device running a real XNU kernel, interpreted natively on this iPad. The machine itself comes from the translator pack above.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
@@ -147,7 +205,7 @@ struct iPadRootView: View {
                     .buttonStyle(.bordered)
                 Button("Boot kernel") { vm.bootSelectedKernel() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(vm.selectedKernel == nil)
+                    .disabled(vm.selectedKernel == nil || vm.selectedPack == nil)
                 Button("Pause") { vm.pause() }
                     .buttonStyle(.bordered)
                     .disabled(!vm.isRunning)

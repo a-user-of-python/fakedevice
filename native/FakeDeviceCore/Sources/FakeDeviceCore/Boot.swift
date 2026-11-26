@@ -4,11 +4,11 @@
 // image) -> LLB (DRAM up) -> iBoot (Mach-O segment load, boot_args
 // revision 2, minimal Apple Device Tree), starting the CPU at the true
 // LC_UNIXTHREAD entry point. The kernelcache is loaded unmodified.
+// Every machine-specific value (load bases, DRAM size, UART, CPU
+// topology, ADT content, boot_args template) comes from the loaded
+// translator pack — nothing about a specific device is compiled in.
 
 import Foundation
-
-public let KC_VIRT_BASE: UInt64 = 0xFFFFFFF007004000
-public let KC_PHYS_BASE: UInt64 = 0x801004000   // this kernelcache's expected load base
 
 public struct BootError: Error, LocalizedError {
     public let message: String
@@ -69,7 +69,7 @@ public func parseMachO(_ bytes: [UInt8]) throws -> MachOImage {
     return MachOImage(segments: segments, entry: entry)
 }
 
-// MARK: - Minimal Apple Device Tree
+// MARK: - Minimal Apple Device Tree (structure from the pack)
 
 private func adtProp(_ name: String, _ value: [UInt8]) -> [UInt8] {
     var out = [UInt8]()
@@ -102,62 +102,56 @@ private func adtNode(_ name: String, _ props: [[UInt8]], _ children: [[UInt8]]) 
     return out
 }
 
-public func buildADT(_ uartBase: UInt64) -> [UInt8] {
-    let uart0 = adtNode("uart0", [
-        adtProp("compatible", adtStr("samsung,uart")),
-        adtProp("reg", adtReg(uartBase, 0x1000)),
-        adtProp("interrupts", adtU32(0) + adtU32(0x51) + adtU32(0)),
+public func buildADT(_ pack: TranslatorPack) -> [UInt8] {
+    let uart0 = adtNode(pack.uart.name, [
+        adtProp("compatible", adtStr(pack.uart.compatible)),
+        adtProp("reg", adtReg(pack.uartBase, pack.uartSize)),
+        adtProp("interrupts", pack.uart.interrupts.flatMap { adtU32($0) }),
     ], [])
-    let armIo = adtNode("arm-io", [
-        adtProp("compatible", adtStr("arm-io,t8030")),
-        adtProp("device_type", adtStr("arm-io")),
-        adtProp("#address-cells", adtU32(2)),
-        adtProp("#size-cells", adtU32(2)),
-        adtProp("reg", adtReg(0x200000000, 0x100000000)),
-        adtProp("ranges", []),
-    ], [uart0])
-    // /chosen/random-seed: a fixed pattern on purpose — deterministic run to run.
-    var seed = [UInt8](repeating: 0, count: 64)
-    for i in 0..<64 { seed[i] = UInt8((i * 37 + 11) & 0xFF) }
-    let chosen = adtNode("chosen", [
-        adtProp("random-seed", seed),
+    var armIoProps: [[UInt8]] = [
+        adtProp("compatible", adtStr(pack.armIo.compatible)),
+        adtProp("device_type", adtStr(pack.armIo.deviceType)),
+        adtProp("#address-cells", adtU32(pack.armIo.addressCells)),
+        adtProp("#size-cells", adtU32(pack.armIo.sizeCells)),
+        adtProp("reg", adtReg(TranslatorPack.hex(pack.armIo.regAddress), TranslatorPack.hex(pack.armIo.regSize))),
+    ]
+    if pack.armIo.rangesEmpty { armIoProps.append(adtProp("ranges", [])) }
+    let armIo = adtNode(pack.armIo.name, armIoProps, [uart0])
+    // /chosen/random-seed: real iBoot fills this from the hardware RNG; the
+    // pack carries a fixed seed so runs stay deterministic.
+    let chosen = adtNode(pack.deviceTree.chosenNodeName, [
+        adtProp("random-seed", pack.randomSeed),
     ], [])
-    let memory = adtNode("memory", [
-        adtProp("reg", adtReg(0x800000000, MEM_SIZE)),
+    let memory = adtNode(pack.deviceTree.memoryNodeName, [
+        adtProp("reg", adtReg(pack.dramBase, pack.dramSize)),
     ], [])
-    // A13 (t8030): 4 Thunder (cluster 'E') + 2 Lightning (cluster 'P') cores.
-    func cpuNode(_ n: Int, _ reg: UInt32, _ cluster: UInt32, _ state: String) -> [UInt8] {
-        adtNode("cpu@\(n)", [
-            adtProp("compatible", adtStr(cluster == 0x50 ? "apple,lightning" : "apple,thunder")),
-            adtProp("device_type", adtStr("cpu")),
-            adtProp("reg", adtU32(reg)),
-            adtProp("state", adtStr(state)),
-            adtProp("cluster-type", adtU32(cluster)),
+    // CPU topology from the pack; the kernel's topology parser requires
+    // "state" ("running" = boot CPU) and "reg" on every cpu child.
+    func cpuNode(_ cpu: TranslatorPack.Cpus.Cpu) -> [UInt8] {
+        adtNode(cpu.name, [
+            adtProp("compatible", adtStr(cpu.compatible)),
+            adtProp("device_type", adtStr(pack.cpus.deviceType)),
+            adtProp("reg", adtU32(cpu.reg)),
+            adtProp("state", adtStr(cpu.state)),
+            adtProp("cluster-type", adtU32(cpu.clusterType)),
         ], [])
     }
-    let cpus = adtNode("cpus", [
-        adtProp("#address-cells", adtU32(1)),
-        adtProp("#size-cells", adtU32(0)),
-    ], [
-        cpuNode(0, 0x000, 0x45, "running"),
-        cpuNode(1, 0x001, 0x45, "idle"),
-        cpuNode(2, 0x002, 0x45, "idle"),
-        cpuNode(3, 0x003, 0x45, "idle"),
-        cpuNode(4, 0x100, 0x50, "idle"),
-        cpuNode(5, 0x101, 0x50, "idle"),
-    ])
-    let root = adtNode("/", [
-        adtProp("compatible", adtStr("apple,t8030")),
-        adtProp("model", adtStr("iPhone12,1")),
-        adtProp("#address-cells", adtU32(2)),
-        adtProp("#size-cells", adtU32(2)),
+    let cpus = adtNode(pack.cpus.name, [
+        adtProp("#address-cells", adtU32(pack.cpus.addressCells)),
+        adtProp("#size-cells", adtU32(pack.cpus.sizeCells)),
+    ], pack.cpus.list.map(cpuNode))
+    let root = adtNode(pack.deviceTree.rootName, [
+        adtProp("compatible", adtStr(pack.deviceTree.rootCompatible)),
+        adtProp("model", adtStr(pack.deviceTree.model)),
+        adtProp("#address-cells", adtU32(pack.deviceTree.rootAddressCells)),
+        adtProp("#size-cells", adtU32(pack.deviceTree.rootSizeCells)),
     ], [chosen, memory, cpus, armIo])
     return root
 }
 
-// MARK: - boot_args (arm64, revision 2)
+// MARK: - boot_args (arm64, revision 2 layout; values from the pack)
 
-public func buildBootArgs(_ m: Machine, _ bootArgsAddr: UInt64, _ adtAddr: UInt64, _ adtLen: Int, _ topOfKernelData: UInt64) throws {
+public func buildBootArgs(_ m: Machine, _ pack: TranslatorPack, _ bootArgsAddr: UInt64, _ adtAddr: UInt64, _ adtLen: Int, _ topOfKernelData: UInt64) throws {
     func w64(_ off: Int, _ v: UInt64) throws {
         for i in 0..<8 { try m.writeMem(bootArgsAddr &+ UInt64(off + i), 1, (v >> (8 * i)) & 0xFF) }
     }
@@ -168,22 +162,27 @@ public func buildBootArgs(_ m: Machine, _ bootArgsAddr: UInt64, _ adtAddr: UInt6
         try m.writeMem(bootArgsAddr &+ UInt64(off), 1, v & 0xFF)
         try m.writeMem(bootArgsAddr &+ UInt64(off + 1), 1, (v >> 8) & 0xFF)
     }
+    let L = pack.bootArgs.layout                   // field offsets (boot.h rev 2), from the pack
     var i = 0
-    while i < 1152 { try m.writeMem(bootArgsAddr &+ UInt64(i), 8, 0); i += 8 }
-    try w16(0, 2)                                   // Revision
-    try w16(2, 2)                                   // Version
-    try w64(8, KC_VIRT_BASE)                        // virtBase
-    try w64(16, KC_PHYS_BASE)                       // physBase
-    try w64(24, MEM_SIZE)                           // memSize
-    try w64(32, topOfKernelData)                    // topOfKernelData
-    // Video (40..87): all zero = no framebuffer, serial console only
-    try w32(88, 0)                                  // machineType
-    try w64(96, adtAddr)                            // deviceTreeP (physical)
-    try w32(104, UInt32(adtLen))                    // deviceTreeLength
-    let cmdline = "-v"
-    for (j, ch) in cmdline.enumerated() { try m.writeMem(bootArgsAddr &+ UInt64(112 + j), 1, UInt64(ch.unicodeScalars.first!.value)) }
-    try w64(1136, 0)                                // bootFlags
-    try w64(1144, MEM_SIZE)                         // memSizeActual
+    while i < pack.bootArgs.structSize { try m.writeMem(bootArgsAddr &+ UInt64(i), 8, 0); i += 8 }
+    try w16(L.revision, UInt64(pack.bootArgs.revision))
+    try w16(L.version, UInt64(pack.bootArgs.version))
+    try w64(L.virtBase, pack.kernelVirtBase)
+    try w64(L.physBase, pack.kernelPhysBase)
+    try w64(L.memSize, pack.dramSize)
+    try w64(L.topOfKernelData, topOfKernelData)     // physical, per boot.h
+    // Video: all zero = no framebuffer, serial console only
+    try w32(L.machineType, pack.bootArgs.machineType)
+    // deviceTreeP is a void* in boot.h: the kernel dereferences it as a
+    // VIRTUAL address, so write phystokv(adtAddr), not the physical
+    // address (stage-5 frontier 2 — see PACK.md).
+    try w64(L.deviceTreeP, adtAddr &- pack.kernelPhysBase &+ pack.kernelVirtBase)
+    try w32(L.deviceTreeLength, UInt32(adtLen))
+    for (j, ch) in pack.bootArgs.commandLine.enumerated() {
+        try m.writeMem(bootArgsAddr &+ UInt64(L.commandLine + j), 1, UInt64(ch.unicodeScalars.first!.value))
+    }
+    try w64(L.bootFlags, TranslatorPack.hex(pack.bootArgs.bootFlags))
+    try w64(L.memSizeActual, pack.dramSize)
 }
 
 // MARK: - The fake boot chain: BootROM -> LLB -> iBoot
@@ -204,30 +203,31 @@ public func stageBootROM(_ bytes: [UInt8], _ log: (String) -> Void) throws -> Ma
     return parsed
 }
 
-public func stageLLB(_ log: (String) -> Void) {
-    log("LLB: DRAM up — \(MEM_SIZE / 0x40000000) GiB at 0x800000000 — iBoot loaded, jumping")
+public func stageLLB(_ pack: TranslatorPack, _ log: (String) -> Void) {
+    log("LLB: DRAM up — \(pack.dramSize / 0x40000000) GiB at \(hexStr(pack.dramBase)) — iBoot loaded, jumping")
 }
 
-public func stageIBoot(_ m: Machine, _ bytes: [UInt8], _ parsed: MachOImage, _ log: (String) -> Void) throws -> BootResult {
-    var kernelTop = KC_PHYS_BASE
+public func stageIBoot(_ m: Machine, _ bytes: [UInt8], _ parsed: MachOImage, _ pack: TranslatorPack, _ log: (String) -> Void) throws -> BootResult {
+    var kernelTop = pack.kernelPhysBase
     for s in parsed.segments {
         if s.filesize == 0 { continue }
-        let phys = KC_PHYS_BASE &+ (s.vmaddr &- KC_VIRT_BASE)
+        let phys = pack.kernelPhysBase &+ (s.vmaddr &- pack.kernelVirtBase)
         let start = Int(s.fileoff), end = Int(s.fileoff + s.filesize)
         m.loadBytes(phys, Array(bytes[start..<end]))
         let segEnd = phys &+ s.vmsize
         if segEnd > kernelTop { kernelTop = segEnd }
         log("iBoot: loaded \(s.name) at phys \(hexStr(phys)) (\(s.filesize) bytes)")
     }
-    func align(_ a: UInt64) -> UInt64 { (a &+ 0x3FFF) & ~0x3FFF }
-    let bootArgsAddr = align(kernelTop)
-    let adtAddr = bootArgsAddr &+ 0x4000
-    let adt = buildADT(0x235200000)
+    let pageMask = pack.pageSize &- 1
+    func align(_ a: UInt64) -> UInt64 { (a &+ pageMask) & ~pageMask }
+    let bootArgsAddr = align(kernelTop) &+ TranslatorPack.hex(pack.bootLayout.bootArgsOffsetFromKernelTop)
+    let adtAddr = bootArgsAddr &+ TranslatorPack.hex(pack.bootLayout.adtOffsetFromBootArgs)
+    let adt = buildADT(pack)
     m.loadBytes(adtAddr, adt)
     let topOfKernelData = align(adtAddr &+ UInt64(adt.count))
-    try buildBootArgs(m, bootArgsAddr, adtAddr, adt.count, topOfKernelData)
+    try buildBootArgs(m, pack, bootArgsAddr, adtAddr, adt.count, topOfKernelData)
     let entry = parsed.entry!
-    let entryPhys = KC_PHYS_BASE &+ (entry &- KC_VIRT_BASE)
+    let entryPhys = pack.kernelPhysBase &+ (entry &- pack.kernelVirtBase)
     m.x[0] = bootArgsAddr                           // X0 = boot_args, as iBoot leaves it
     m.pc = entryPhys
     m.sp = 0                                        // kernel sets its own stack
@@ -236,8 +236,8 @@ public func stageIBoot(_ m: Machine, _ bytes: [UInt8], _ parsed: MachOImage, _ l
     return BootResult(entryPhys: entryPhys, bootArgsAddr: bootArgsAddr, adtAddr: adtAddr)
 }
 
-public func bootKernel(_ m: Machine, _ bytes: [UInt8], _ log: (String) -> Void) throws -> BootResult {
+public func bootKernel(_ m: Machine, _ bytes: [UInt8], _ pack: TranslatorPack, _ log: (String) -> Void) throws -> BootResult {
     let parsed = try stageBootROM(bytes, log)
-    stageLLB(log)
-    return try stageIBoot(m, bytes, parsed, log)
+    stageLLB(pack, log)
+    return try stageIBoot(m, bytes, parsed, pack, log)
 }

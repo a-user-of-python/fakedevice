@@ -22,6 +22,7 @@
 		EE0000000000000000000006 /* Backdoor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000006 /* Backdoor.swift */; };
 		EE0000000000000000000007 /* FakeDeviceCoreMachine.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000007 /* FakeDeviceCoreMachine.swift */; };
 		EE0000000000000000000008 /* SelfTestProgram.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000008 /* SelfTestProgram.swift */; };
+		EE0000000000000000000009 /* TranslatorPack.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD0000000000000000000009 /* TranslatorPack.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +43,7 @@
 		DD0000000000000000000006 /* Backdoor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Backdoor.swift; sourceTree = "<group>"; };
 		DD0000000000000000000007 /* FakeDeviceCoreMachine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FakeDeviceCoreMachine.swift; sourceTree = "<group>"; };
 		DD0000000000000000000008 /* SelfTestProgram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfTestProgram.swift; sourceTree = "<group>"; };
+		DD0000000000000000000009 /* TranslatorPack.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranslatorPack.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -98,8 +100,9 @@
 				DD0000000000000000000006 /* Backdoor.swift */,
 				DD0000000000000000000007 /* FakeDeviceCoreMachine.swift */,
 				DD0000000000000000000008 /* SelfTestProgram.swift */,
+				DD0000000000000000000009 /* TranslatorPack.swift */,
 			);
-			path = ../FakeDeviceCore/Sources/FakeDeviceCore;
+			path = FakeDeviceCore/Sources/FakeDeviceCore;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -185,6 +188,7 @@
 				EE0000000000000000000006 /* Backdoor.swift in Sources */,
 				EE0000000000000000000007 /* FakeDeviceCoreMachine.swift in Sources */,
 				EE0000000000000000000008 /* SelfTestProgram.swift in Sources */,
+				EE0000000000000000000009 /* TranslatorPack.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

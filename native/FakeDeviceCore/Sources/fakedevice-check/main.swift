@@ -10,11 +10,13 @@
 //   kernel boot — with a kernelcache path argument: the Swift core must
 //                 reach the reference's exact endpoint, measured from the
 //                 JS core the same day (the boot frontier moves as the
-//                 reference improves): first exception delivered at
-//                 instruction 9,261,731 with the same ESR/FAR/ELR/SPSR,
-//                 kernel parked at 0xFFFFFFF0081BA410)
+//                 reference improves): the first exception (an undefined
+//                 instruction) is delivered at instruction 17,723,144 and
+//                 the kernel parks at 0xFFFFFFF0081BA410.
 //
-// Exit code 0 only if every check passes.
+// The machine definition arrives as DATA: the harness loads the
+// translator pack (argv[2], else the repo's build/ copy) exactly like
+// the apps do. Exit code 0 only if every check passes.
 
 import Foundation
 import FakeDeviceCore
@@ -27,12 +29,38 @@ func chkEq<T: Equatable>(_ name: String, _ got: T, _ want: T) {
     if got == want { pass += 1 } else { fail += 1; print("FAIL: \(name) — got \(got), want \(want)") }
 }
 
+// MARK: translator pack (the machine definition, as data)
+let packPath: String? = {
+    if CommandLine.arguments.count > 2 { return CommandLine.arguments[2] }
+    for candidate in ["build/translator-pack-iphone11.json",
+                      "../build/translator-pack-iphone11.json",
+                      "../../build/translator-pack-iphone11.json",
+                      "translator-pack-iphone11.json"] {
+        if FileManager.default.fileExists(atPath: candidate) { return candidate }
+    }
+    return nil
+}()
+guard let packPath, let packData = FileManager.default.contents(atPath: packPath),
+      let pack = try? TranslatorPack.load(packData) else {
+    print("FAIL: translator pack not found/loadable (pass its path as argv[2])")
+    exit(2)
+}
+let def = pack.machineDefinition
+let dramBase = pack.dramBase
+print("translator pack: \(pack.displayName) from \(packPath)")
+chkEq("pack DRAM base", pack.dramBase, 0x800000000)
+chkEq("pack kernel phys base", pack.kernelPhysBase, 0x801004000)
+chkEq("pack kernel virt base", pack.kernelVirtBase, 0xFFFFFFF007004000)
+chkEq("pack UART base", pack.uartBase, 0x235200000)
+chkEq("pack CPU count", pack.cpus.list.count, 6)
+chkEq("pack boot CPU state", pack.cpus.list[0].state, "running")
+
 func wordsMachine(_ words: [UInt32]) -> Machine {
-    let m = Machine(onUart: { _ in }, onLog: { _ in })
+    let m = Machine(onUart: { _ in }, onLog: { _ in }, definition: def)
     var bytes = [UInt8]()
     for w in words { bytes += [UInt8(w & 0xFF), UInt8((w >> 8) & 0xFF), UInt8((w >> 16) & 0xFF), UInt8((w >> 24) & 0xFF)] }
-    m.loadBytes(DRAM_BASE, bytes)
-    m.pc = DRAM_BASE
+    m.loadBytes(dramBase, bytes)
+    m.pc = dramBase
     return m
 }
 
@@ -48,10 +76,10 @@ do {
 // MARK: self-test
 do {
     var uart = [UInt8]()
-    let m = Machine(onUart: { uart.append($0) }, onLog: { _ in })
-    m.loadBytes(DRAM_BASE, selfTestProgram)
-    m.sp = DRAM_BASE + 0x100000
-    m.pc = DRAM_BASE
+    let m = Machine(onUart: { uart.append($0) }, onLog: { _ in }, definition: def)
+    m.loadBytes(dramBase, selfTestProgram)
+    m.sp = dramBase + 0x100000
+    m.pc = dramBase
     m.run(100000)
     chkEq("self-test UART", String(bytes: uart, encoding: .utf8) ?? "", "test\n55\n")
     chkEq("self-test status", m.status, "halted")
@@ -70,7 +98,7 @@ do {
 
 // MARK: SIMD (test_simd.mjs's checks, same program bytes)
 do {
-    let m = Machine(onUart: { _ in }, onLog: { _ in })
+    let m = Machine(onUart: { _ in }, onLog: { _ in }, definition: def)
     m.loadBytes(0x800010000, testSimdProgram)
     m.pc = 0x800010000
     m.run(100000)
@@ -118,7 +146,7 @@ do {
 
 // MARK: MUL (test_mul.mjs's checks, same program bytes)
 do {
-    let m = Machine(onUart: { _ in }, onLog: { _ in })
+    let m = Machine(onUart: { _ in }, onLog: { _ in }, definition: def)
     m.loadBytes(0x800010000, testMulProgram)
     m.pc = 0x800010000
     m.run(100000)
@@ -143,7 +171,7 @@ do {
 }
 
 // MARK: ADT
-chkEq("ADT length", buildADT(0x235200000).count, 2740)
+chkEq("ADT length", buildADT(pack).count, 2740)
 
 // MARK: kernel boot parity (needs the kernelcache path)
 if CommandLine.arguments.count > 1 {
@@ -153,31 +181,33 @@ if CommandLine.arguments.count > 1 {
     var logs = [String]()
     core.onLog = { logs.append($0) }
     do {
+        try core.loadTranslatorPack(packData)
+        chkEq("adapter reports pack name", core.translatorPackName, pack.displayName)
         try core.boot(kernelData: data)
         chk("boot chain completed", true)
-        chk("boot log names BootROM stage", logs.first?.hasPrefix("BootROM:") ?? false)
+        chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
-        m.run(9_000_000)
-        chkEq("icount before final approach", m.icount, 9_000_000)
+        m.run(17_000_000)
+        chkEq("icount before final approach", m.icount, 17_000_000)
         var guardSteps = 0
         while m.exceptions == 0 && guardSteps < 2_000_000 { _ = m.step(); guardSteps += 1 }
-        chkEq("first exception delivered at icount", m.icount, 9_261_731)
+        chkEq("first exception delivered at icount", m.icount, 17_723_144)
         chkEq("exceptions after delivery", m.exceptions, 1)
-        chkEq("ESR_EL1", m.sysregValue(3, 0, 5, 2, 0), 0x96000005)
-        chkEq("FAR_EL1", m.sysregValue(3, 0, 6, 0, 0), 0xFFFFFFE806002098)
-        chkEq("ELR_EL1", m.sysregValue(3, 0, 4, 0, 1), 0xFFFFFFF007BCCC60)
-        chkEq("SPSR_EL1", m.sysregValue(3, 0, 4, 0, 0), 0x800003C5)
+        chkEq("ESR_EL1", m.sysregValue(3, 0, 5, 2, 0), 0x2000000)
+        chkEq("FAR_EL1", m.sysregValue(3, 0, 6, 0, 0), 0)
+        chkEq("ELR_EL1", m.sysregValue(3, 0, 4, 0, 1), 0xFFFFFFF007A9AFD8)
+        chkEq("SPSR_EL1", m.sysregValue(3, 0, 4, 0, 0), 0x600003C5)
         chkEq("PC after delivery (VBAR+0x200)", m.pc, 0xFFFFFFF0081B9200)
-        // run on until the kernel parks itself in its own hang loop
-        var parked = false
-        for _ in 0..<10 {
-            let before = m.pc
-            m.run(2_000_000)
-            if m.status == "ready" && m.pc == before { parked = true; break }
-        }
-        chk("kernel parked (PC unmoved for a full chunk)", parked)
+        chkEq("lastException text", m.lastException, "undefined instruction, ELR 0xfffffff007a9afd8 -> vector 0xfffffff0081b9200")
+        // step on until the kernel parks itself in its own hang loop
+        var parkSteps = 0
+        while m.pc != 0xFFFFFFF0081BA410 && parkSteps < 1_000_000 { _ = m.step(); parkSteps += 1 }
         chkEq("parked PC", m.pc, 0xFFFFFFF0081BA410)
-        chkEq("parked SP", m.sp, 0xFFFFFFF009C03CC0)
+        chkEq("icount at park", m.icount, 17_723_155)
+        chkEq("parked SP", m.sp, 0xFFFFFFF009C03D20)
+        let pcAtPark = m.pc
+        m.run(2_000_000)
+        chk("kernel stays parked (PC unmoved over 2M more)", m.pc == pcAtPark)
         chkEq("exceptions total", m.exceptions, 1)
         chk("MMU on at park", m.mmuOn)
         chkEq("status at park", m.status, "ready")

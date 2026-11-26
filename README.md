@@ -11,7 +11,8 @@ obtained). Bring your own `kernelcache.raw` and place it in `kernelcache/`.
 
 ## Current status (honest)
 
-Work in progress. As of the stage-4 snapshot in `build/`:
+Work in progress. Current status (the `build/` copy of `emu.js`/`boot.js`
+is the stage-4 snapshot; the translator pack files there are current):
 
 - The fake boot chain runs end to end: BootROM verifies the image, LLB brings
   up (sparse, paged) DRAM, iBoot loads the kernel segments, builds the
@@ -19,18 +20,25 @@ Work in progress. As of the stage-4 snapshot in `build/`:
   entry point.
 - The kernel runs its own start code, programs TTBR0/TTBR1/TCR, turns its MMU
   on, parses the device tree, builds its CPU topology, and executes roughly
-  **9.3 million instructions** before the first delivered fault (the count
-  moves as the boot work progresses; the native Swift core is verified to
-  reach the identical endpoint — see `native/README.md`).
+  **17.7 million instructions** before the first delivered exception (the
+  count moves as the boot work progresses; the native Swift core is verified
+  to reach the identical endpoint — see `native/README.md`).
 - Faults and undefined instructions are delivered to the kernel's own
   exception vector (VBAR) with ESR/FAR/ELR/SPSR set the way hardware sets
   them, and `ERET` returns from them.
-- The boot currently ends when the kernel takes an early data abort in
-  subsystem setup, its own handler runs, and the kernel parks in its
-  stack-guard hang loop — the fault strikes before its per-CPU exception
-  machinery is finished, so it hangs rather than corrupt memory. Tracing the
-  pointer behind that fault is the next piece of work. The serial console is
-  not awake that early, so the serial pane stays empty for now.
+- The boot currently ends when the kernel executes an instruction word the
+  emulator does not yet decode; the exception is delivered, the kernel's own
+  handler runs, and the kernel parks in its stack-guard hang loop — it hangs
+  rather than corrupt memory. Decoding that frontier is the next piece of
+  work. The serial console is not awake that early, so the serial pane stays
+  empty for now.
+- **Everything is separate in the native apps:** the app is a shell + the
+  Swift interpreter — no kernel and no machine definition are baked in.
+  On first open the user imports a kernelcache AND a **translator pack**
+  (`build/translator-pack-iphone11.json`, schema in `build/PACK.md`): a
+  JSON data file defining the machine — memory map, load bases, UART,
+  CPU topology, device tree, boot_args layout. Web and native consume
+  the same pack so they cannot drift.
 - A backdoor console (web page and native app) gives open access to the fake
   phone: inspect/patch memory and registers, set breakpoints, single-step,
   and type into its serial port.
@@ -43,6 +51,10 @@ Work in progress. As of the stage-4 snapshot in `build/`:
     delivery, paged sparse RAM, t8030 UART + stub MMIO.
   - `boot.js` — the fake boot chain (`stageBootROM` → `stageLLB` →
     `stageIBoot`), Mach-O loader, `boot_args` and ADT builders.
+  - `translator-pack-iphone11.json` + `PACK.md` — the machine definition
+    as DATA (see above), consumed by both the web core and the native
+    Swift core; `packcheck.mjs` proves the web core's built-in copy and
+    this file agree.
   - `page4_template.html` — the stage-4 page template (kernel embedded,
     backdoor console in-page). `build_page4.mjs` assembles the final page;
     `build_page.mjs` builds the earlier stage-3 page.
