@@ -19,6 +19,16 @@
 // plain-language error; the caller logs it and the manual import UI
 // remains as the fallback. Nothing here fakes success — the kernel is
 // only filed after its SHA-256 matches the known 14.8 build.
+//
+// CRASH-SAFETY RULE for this whole file (0.1.1 fix): a failed or
+// malformed download must NEVER take the app down. There are no force
+// unwraps, no unchecked subscripts, and no unbounded reads anywhere in
+// the fetch / parse / decode path — every byte read is bounds-checked
+// and every failure surfaces as a thrown FetcherError. (0.1.0 crashed
+// on launch: inflateRawDeflate built its compression_stream with
+// UnsafeMutablePointer(bitPattern: 0)! — a force unwrap of nil — so
+// the app died the moment the kernelcache download finished and the
+// inflate step began.)
 
 import Foundation
 import Compression
@@ -44,13 +54,25 @@ struct FirstRunFetcher {
     static let expectedKernelSize = 46_748_272
     static let expectedKernelSHA256 = "2bf684f41f79bd309e70398b6116eb2054e217892daa52e919bdfd7634e4f246"
 
-    private static let ipswAPI = URL(string: "https://api.ipsw.me/v4/device/iPhone12,1?type=ipsw")!
+    private static let ipswAPIString = "https://api.ipsw.me/v4/device/iPhone12,1?type=ipsw"
+
+    /// A dedicated session with sane timeouts: a dead or stalled
+    /// network must surface as a plain logged failure, never as a
+    /// launch that hangs or an app that destabilizes. (URLSession.shared
+    /// allows a 7-day resource timeout by default.)
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForResource = 900
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
 
     // MARK: - Translator pack
 
     static func fetchPack(into dir: URL, log: @escaping Log) async throws -> URL {
         log("[setup] Downloading translator pack from the project repo…")
-        let (data, response) = try await URLSession.shared.data(from: DownloadLinks.translatorPack)
+        let (data, response) = try await session.data(from: DownloadLinks.translatorPack)
         try checkHTTP(response, "translator pack download")
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               (obj["packVersion"] as? NSNumber)?.intValue == 1 else {
@@ -67,7 +89,10 @@ struct FirstRunFetcher {
     static func fetchKernel(into dir: URL, log: @escaping Log) async throws -> URL {
         // 1. Resolve the iOS 14.8 (18H17) IPSW URL from the ipsw.me API.
         log("[setup] Resolving the iOS 14.8 IPSW for iPhone 11 (iPhone12,1) via ipsw.me…")
-        let (apiData, apiResponse) = try await URLSession.shared.data(from: ipswAPI)
+        guard let ipswAPI = URL(string: Self.ipswAPIString) else {
+            throw FetcherError.badData("the ipsw.me API address is malformed")
+        }
+        let (apiData, apiResponse) = try await session.data(from: ipswAPI)
         try checkHTTP(apiResponse, "ipsw.me API")
         guard let root = try? JSONSerialization.jsonObject(with: apiData) as? [String: Any],
               let firmwares = root["firmwares"] as? [[String: Any]],
@@ -81,6 +106,7 @@ struct FirstRunFetcher {
         // 2. ZIP surgery over range requests: total size, EOCD (ZIP64),
         //    central directory, the one entry we need.
         let total = try await totalSize(ipswURL)
+        guard total > 0 else { throw FetcherError.badData("the IPSW reports a size of zero") }
         let tailLen = min(total, 1 << 20)
         let tail = try await range(ipswURL, total - tailLen, total - 1)
         guard let cd = try await centralDirectory(ipswURL, tail: tail, total: total) else {
@@ -89,12 +115,22 @@ struct FirstRunFetcher {
         guard let entry = cd.entries[kernelEntryName] ?? cd.entries.first(where: { $0.key.contains("kernelcache.release.") && $0.key.contains("iphone12b") })?.value else {
             throw FetcherError.badData("no \(kernelEntryName) entry in the IPSW")
         }
+        // Sanity-bound the entry before trusting its sizes anywhere
+        // (reserveCapacity, loop counts, output sizing).
+        guard entry.csize > 0, entry.usize > 0,
+              entry.csize <= total, entry.usize <= 256_000_000,
+              entry.lhofs >= 0, entry.lhofs < total else {
+            throw FetcherError.badData("the kernelcache entry in the IPSW has implausible sizes (csize \(entry.csize), usize \(entry.usize))")
+        }
         log("[setup] Found \(kernelEntryName): \(entry.usize) bytes in the archive (method \(entry.method)).")
 
         // 3. Local header -> data start; download the entry in chunks.
         let lh = try await range(ipswURL, entry.lhofs, entry.lhofs + 29)
-        guard lh.count >= 30, u32(lh, 0) == 0x04034B50 else { throw FetcherError.badData("bad ZIP local header") }
-        let dataStart = entry.lhofs + 30 + Int(u16(lh, 26)) + Int(u16(lh, 28))
+        guard lh.count == 30, try u32(lh, 0) == 0x04034B50 else { throw FetcherError.badData("bad ZIP local header") }
+        let dataStart = entry.lhofs + 30 + Int(try u16(lh, 26)) + Int(try u16(lh, 28))
+        guard dataStart > 0, dataStart + entry.csize <= total else {
+            throw FetcherError.badData("the kernelcache entry's data range falls outside the IPSW")
+        }
         var compressed = Data()
         compressed.reserveCapacity(entry.csize)
         let chunk = 4 << 20
@@ -150,12 +186,20 @@ struct FirstRunFetcher {
         }
     }
 
+    /// Range request that VERIFIES the byte count: a short or overlong
+    /// body is a thrown error here, never a trap in a parser downstream.
     private static func range(_ url: URL, _ start: Int, _ end: Int) async throws -> Data {
+        guard start >= 0, end >= start else {
+            throw FetcherError.badData("invalid range request \(start)-\(end)")
+        }
         var req = URLRequest(url: url)
         req.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
-        let (data, response) = try await URLSession.shared.data(for: req)
+        let (data, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse, http.statusCode == 206 else {
             throw FetcherError.http("range request \(start)-\(end) was not honoured (HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1))")
+        }
+        guard data.count == end - start + 1 else {
+            throw FetcherError.badData("range request \(start)-\(end) returned \(data.count) bytes, want \(end - start + 1)")
         }
         return data
     }
@@ -163,26 +207,33 @@ struct FirstRunFetcher {
     private static func totalSize(_ url: URL) async throws -> Int {
         var req = URLRequest(url: url)
         req.setValue("bytes=0-0", forHTTPHeaderField: "Range")
-        let (_, response) = try await URLSession.shared.data(for: req)
+        let (_, response) = try await session.data(for: req)
         guard let http = response as? HTTPURLResponse,
               let cr = http.value(forHTTPHeaderField: "Content-Range"),
-              let total = Int(cr.split(separator: "/").last ?? "") else {
+              let totalText = cr.split(separator: "/").last,
+              let total = Int(totalText) else {
             throw FetcherError.http("could not learn the IPSW size from its Content-Range")
         }
         return total
     }
 
     // MARK: - ZIP central directory (mirrors fetch_kernelcache.py)
+    //
+    // All readers are bounds-checked and throwing: any short buffer or
+    // corrupt offset is a FetcherError, never an out-of-bounds trap.
 
     private struct ZipEntry { var method: Int; var csize: Int; var usize: Int; var lhofs: Int }
 
-    private static func u16(_ d: Data, _ off: Int) -> UInt16 {
-        UInt16(d[off]) | UInt16(d[off + 1]) << 8
+    private static func u16(_ d: Data, _ off: Int) throws -> UInt16 {
+        guard off >= 0, off + 2 <= d.count else { throw FetcherError.badData("ZIP read past the end of a buffer (u16 at \(off), size \(d.count))") }
+        return UInt16(d[off]) | UInt16(d[off + 1]) << 8
     }
-    private static func u32(_ d: Data, _ off: Int) -> UInt32 {
-        UInt32(d[off]) | UInt32(d[off + 1]) << 8 | UInt32(d[off + 2]) << 16 | UInt32(d[off + 3]) << 24
+    private static func u32(_ d: Data, _ off: Int) throws -> UInt32 {
+        guard off >= 0, off + 4 <= d.count else { throw FetcherError.badData("ZIP read past the end of a buffer (u32 at \(off), size \(d.count))") }
+        return UInt32(d[off]) | UInt32(d[off + 1]) << 8 | UInt32(d[off + 2]) << 16 | UInt32(d[off + 3]) << 24
     }
-    private static func u64(_ d: Data, _ off: Int) -> UInt64 {
+    private static func u64(_ d: Data, _ off: Int) throws -> UInt64 {
+        guard off >= 0, off + 8 <= d.count else { throw FetcherError.badData("ZIP read past the end of a buffer (u64 at \(off), size \(d.count))") }
         var v: UInt64 = 0
         for i in 0..<8 { v |= UInt64(d[off + i]) << (8 * i) }
         return v
@@ -190,49 +241,62 @@ struct FirstRunFetcher {
 
     private static func centralDirectory(_ url: URL, tail: Data, total: Int) async throws -> (entries: [String: ZipEntry], count: Int)? {
         // EOCD is the last PK\x05\x06 in the tail.
+        guard tail.count >= 22 else { return nil }
         var eocdOff = -1
         var i = tail.count - 22
         while i >= 0 {
-            if u32(tail, i) == 0x06054B50 { eocdOff = i; break }
+            if (try? u32(tail, i)) == 0x06054B50 { eocdOff = i; break }
             i -= 1
         }
         guard eocdOff >= 0 else { return nil }
-        var cdSize = Int(u32(tail, eocdOff + 12))
-        var cdOff = Int(u32(tail, eocdOff + 16))
-        var nTotal = Int(u16(tail, eocdOff + 10))
+        var cdSize = Int(try u32(tail, eocdOff + 12))
+        var cdOff = Int(try u32(tail, eocdOff + 16))
+        var nTotal = Int(try u16(tail, eocdOff + 10))
         if cdOff == 0xFFFFFFFF || cdSize == 0xFFFFFFFF || nTotal == 0xFFFF {
             // ZIP64: the locator sits in the 20 bytes before the EOCD.
             let loc = eocdOff - 20
-            guard loc >= 0, u32(tail, loc) == 0x07064B50 else { return nil }
-            let z64Off = Int(u64(tail, loc + 8))
+            guard loc >= 0, (try? u32(tail, loc)) == 0x07064B50 else { return nil }
+            let z64Off = Int(try u64(tail, loc + 8))
+            guard z64Off >= 0, z64Off + 56 <= total else { return nil }
             let rec = try await range(url, z64Off, z64Off + 55)
-            guard rec.count >= 56, u32(rec, 0) == 0x06064B50 else { return nil }
-            nTotal = Int(u64(rec, 32))
-            cdSize = Int(u64(rec, 40))
-            cdOff = Int(u64(rec, 48))
+            guard rec.count == 56, (try? u32(rec, 0)) == 0x06064B50 else { return nil }
+            nTotal = Int(try u64(rec, 32))
+            cdSize = Int(try u64(rec, 40))
+            cdOff = Int(try u64(rec, 48))
         }
+        guard cdOff >= 0, cdSize >= 4, cdOff + cdSize <= total else { return nil }
         let cd = try await range(url, cdOff, cdOff + cdSize - 1)
-        guard cd.count >= 4, u32(cd, 0) == 0x02014B50 else { return nil }
+        guard cd.count == cdSize, (try? u32(cd, 0)) == 0x02014B50 else { return nil }
         var entries: [String: ZipEntry] = [:]
         var pos = 0
-        while pos + 46 <= cd.count, u32(cd, pos) == 0x02014B50 {
-            let method = Int(u16(cd, pos + 10))
-            var csize = Int(u32(cd, pos + 20))
-            var usize = Int(u32(cd, pos + 24))
-            let nlen = Int(u16(cd, pos + 28)), elen = Int(u16(cd, pos + 30)), clen = Int(u16(cd, pos + 32))
-            var lhofs = Int(u32(cd, pos + 42))
+        while pos + 46 <= cd.count, (try? u32(cd, pos)) == 0x02014B50 {
+            let method = Int(try u16(cd, pos + 10))
+            var csize = Int(try u32(cd, pos + 20))
+            var usize = Int(try u32(cd, pos + 24))
+            let nlen = Int(try u16(cd, pos + 28)), elen = Int(try u16(cd, pos + 30)), clen = Int(try u16(cd, pos + 32))
+            var lhofs = Int(try u32(cd, pos + 42))
+            // The whole record — name, extra, comment — must lie inside
+            // the directory buffer before any of it is read or sliced.
+            guard pos + 46 + nlen + elen + clen <= cd.count else {
+                throw FetcherError.badData("a ZIP central directory record overruns the directory")
+            }
             let name = String(decoding: cd[pos + 46..<pos + 46 + nlen], as: UTF8.self)
             // ZIP64 extra field (0x0001): usize, csize, lhofs — only the
             // slots whose 32-bit field is 0xFFFFFFFF, in that order.
+            // Every read stays inside this entry's extra field.
             var ep = pos + 46 + nlen
             let extraEnd = ep + elen
             while ep + 4 <= extraEnd {
-                let tag = u16(cd, ep), esz = Int(u16(cd, ep + 2))
+                let tag = try u16(cd, ep), esz = Int(try u16(cd, ep + 2))
+                guard ep + 4 + esz <= extraEnd else {
+                    throw FetcherError.badData("a ZIP extra field overruns its record")
+                }
                 if tag == 0x0001 {
                     var bp = ep + 4
-                    if usize == 0xFFFFFFFF { usize = Int(u64(cd, bp)); bp += 8 }
-                    if csize == 0xFFFFFFFF { csize = Int(u64(cd, bp)); bp += 8 }
-                    if lhofs == 0xFFFFFFFF { lhofs = Int(u64(cd, bp)); bp += 8 }
+                    if usize == 0xFFFFFFFF { usize = Int(try u64(cd, bp)); bp += 8 }
+                    if csize == 0xFFFFFFFF { csize = Int(try u64(cd, bp)); bp += 8 }
+                    if lhofs == 0xFFFFFFFF { lhofs = Int(try u64(cd, bp)); bp += 8 }
+                    _ = bp
                 }
                 ep += 4 + esz
             }
@@ -250,11 +314,18 @@ struct FirstRunFetcher {
     // has been produced (before the trailing adler check matters).
 
     private static func inflateRawDeflate(_ data: Data, expectedSize: Int) throws -> Data {
+        guard expectedSize > 0, expectedSize <= 256_000_000 else {
+            throw FetcherError.badData("implausible deflate output size \(expectedSize)")
+        }
         var out = Data()
         out.reserveCapacity(expectedSize)
-        var stream = compression_stream(dst_ptr: UnsafeMutablePointer<UInt8>(bitPattern: 0)!,
+        // The stream starts with NULL pointers — the documented
+        // pattern. (0.1.0 force-unwrapped UnsafeMutablePointer(
+        // bitPattern: 0) here, which is nil: an instant crash the
+        // moment this function ran.)
+        var stream = compression_stream(dst_ptr: nil,
                                         dst_size: 0,
-                                        src_ptr: UnsafePointer<UInt8>(bitPattern: 0)!,
+                                        src_ptr: nil,
                                         src_size: 0,
                                         state: nil)
         guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
@@ -266,21 +337,29 @@ struct FirstRunFetcher {
         let cap = 1 << 20
         var dst = [UInt8](repeating: 0, count: cap)
         var failed = false
+        var ended = false
         src.withUnsafeBufferPointer { srcBuf in
-            stream.src_ptr = srcBuf.baseAddress!
+            guard let srcBase = srcBuf.baseAddress else { failed = true; return }
+            stream.src_ptr = srcBase
             stream.src_size = srcBuf.count
             while out.count < expectedSize {
                 var produced = 0
+                var status: compression_status = COMPRESSION_STATUS_OK
                 dst.withUnsafeMutableBufferPointer { dstBuf in
-                    stream.dst_ptr = dstBuf.baseAddress!
+                    guard let dstBase = dstBuf.baseAddress else { failed = true; return }
+                    stream.dst_ptr = dstBase
                     stream.dst_size = dstBuf.count
-                    let status = compression_stream_process(&stream, 0)
+                    status = compression_stream_process(&stream, 0)
                     produced = dstBuf.count - stream.dst_size
-                    if status == COMPRESSION_STATUS_ERROR { failed = true }
                 }
                 if produced > 0 { out.append(contentsOf: dst[0..<produced]) }
-                if failed || produced == 0 { break }
+                if status == COMPRESSION_STATUS_ERROR { failed = true }
+                if status == COMPRESSION_STATUS_END { ended = true }
+                if failed || ended || produced == 0 { break }
             }
+        }
+        guard !failed else {
+            throw FetcherError.badData("the deflate decoder reported an error")
         }
         guard out.count == expectedSize else {
             throw FetcherError.badData("deflate produced \(out.count) bytes, want \(expectedSize)")
@@ -291,7 +370,7 @@ struct FirstRunFetcher {
     // MARK: - IM4P unwrap (DER walk, mirrors the proven python)
 
     private static func derLength(_ d: Data, _ i: inout Int) throws -> Int {
-        guard i < d.count else { throw FetcherError.badData("IM4P truncated") }
+        guard i >= 0, i < d.count else { throw FetcherError.badData("IM4P truncated") }
         let b = d[i]; i += 1
         if b < 0x80 { return Int(b) }
         let n = Int(b & 0x7F)
@@ -312,7 +391,7 @@ struct FirstRunFetcher {
             guard i < d.count else { throw FetcherError.badData("IM4P truncated at element \(elem)") }
             let tag = d[i]; i += 1
             let len = try derLength(d, &i)
-            guard i + len <= d.count else { throw FetcherError.badData("IM4P element \(elem) overruns the file") }
+            guard len >= 0, i + len <= d.count else { throw FetcherError.badData("IM4P element \(elem) overruns the file") }
             if elem == 0 {
                 guard tag == 0x16, String(decoding: d[i..<i + len], as: UTF8.self) == "IM4P" else {
                     throw FetcherError.badData("kernelcache entry is not an IM4P")
@@ -330,12 +409,14 @@ struct FirstRunFetcher {
     // MARK: - LZFSE via the Compression framework
 
     private static func lzfseDecompress(_ data: Data, expectedSize: Int) throws -> Data {
+        guard !data.isEmpty else { throw FetcherError.badData("LZFSE payload is empty") }
         let dst = UnsafeMutablePointer<UInt8>.allocate(capacity: expectedSize)
         defer { dst.deallocate() }
         let written = data.withUnsafeBytes { src -> Int in
-            compression_decode_buffer(dst, expectedSize,
-                                      src.baseAddress!.assumingMemoryBound(to: UInt8.self), data.count,
-                                      nil, COMPRESSION_LZFSE)
+            guard let base = src.baseAddress else { return -1 }
+            return compression_decode_buffer(dst, expectedSize,
+                                             base.assumingMemoryBound(to: UInt8.self), data.count,
+                                             nil, COMPRESSION_LZFSE)
         }
         guard written == expectedSize else {
             throw FetcherError.verify("LZFSE produced \(written) bytes, want \(expectedSize)")
