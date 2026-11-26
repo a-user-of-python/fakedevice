@@ -62,10 +62,10 @@ alternative path (and is how other versions will be tried later).
 - **Native Swift core synced to the reference (2026-11-26):**
   `FakeDeviceCore` is a from-scratch Swift port of the emulator (no
   JavaScript anywhere in the native apps), now ported forward through
-  stage-5 frontiers 3–22: little-endian ADT with real arm-io ranges,
+  stage-5 frontiers 3–23: little-endian ADT with real arm-io ranges,
   `/chosen` dram-base/size and the lock-regs subtree, the AIC + timer
   device-tree nodes with their phandle web, and the `/defaults` node
-  with the serial-console boot-args (the ADT is now 4,948 bytes from
+  with the serial-console boot-args (the ADT is now 4,988 bytes from
   the pack), SIMD shift-by-immediate and
   shift-by-register groups, LD/ST multiple structures, LSE atomics with
   exact CAS, STLUR/LDAPUR and LDAPR, PACGA, PSTATE.PAN, and the CNTV
