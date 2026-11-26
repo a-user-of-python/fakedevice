@@ -29,6 +29,14 @@ public protocol EmulatorCore: AnyObject {
     var onUART: ((UInt8) -> Void)? { get set }
     var onLog: ((String) -> Void)? { get set }
 
+    /// Load a translator pack (the machine definition, as data). The
+    /// app ships as a shell + interpreter with no machine definition
+    /// baked in; boot and the self-test refuse until a pack is loaded.
+    func loadTranslatorPack(_ data: Data) throws
+
+    /// Name of the loaded translator pack, if any.
+    var translatorPackName: String? { get }
+
     /// Run the fake boot chain (BootROM -> LLB -> iBoot) and load the given
     /// kernelcache bytes. Throws with a human-readable message on failure.
     func boot(kernelData: Data) throws

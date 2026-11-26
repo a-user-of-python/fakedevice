@@ -1,6 +1,16 @@
 import Foundation
 import SwiftUI
 
+/// Where a fresh user fetches the two files the app needs. The
+/// translator pack is this project's own data file, hosted in the
+/// project repo. The kernelcache is Apple's binary and is NEVER hosted
+/// by this project — the link goes to the iPhone 11 firmware listing
+/// on ipsw.me, where the official IPSW downloads from Apple's servers.
+enum DownloadLinks {
+    static let translatorPack = URL(string: "https://raw.githubusercontent.com/a-user-of-python/fakedevice/main/build/translator-pack-iphone11.json")!
+    static let kernelFirmwareListing = URL(string: "https://ipsw.me/iPhone12,1")!
+}
+
 /// Drives the emulator core the same way the web page does: run in
 /// 2,000,000-instruction chunks, publish status after each chunk, and treat
 /// "PC did not move for a whole chunk while still ready" as the kernel

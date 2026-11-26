@@ -8,14 +8,7 @@
 
 import Foundation
 
-public let DRAM_BASE: UInt64 = 0x800000000
-public let DRAM_END: UInt64 = 0x1000000000
-public let MEM_SIZE: UInt64 = 0x100000000          // 4 GiB, sparsely committed
 public let PAGE_SIZE = 4096
-public let UART_BASE: UInt64 = 0x235200000         // t8030 (iPhone 11) UART0
-public let UART_UTRSTAT: UInt64 = 0x10
-public let UART_UTXH: UInt64 = 0x20
-public let UART_URXH: UInt64 = 0x24
 
 let M64: UInt64 = 0xFFFFFFFFFFFFFFFF
 
@@ -82,6 +75,8 @@ func sext64(_ val: UInt64, _ bits: Int) -> UInt64 {
 public final class Machine {
     public var onUart: (UInt8) -> Void
     public var onLog: (String) -> Void
+    /// The fake hardware this machine runs, from a translator pack.
+    public let definition: MachineDefinition
 
     var pages: [UInt64: Page] = [:]
     public var x = [UInt64](repeating: 0, count: 31)
@@ -121,9 +116,10 @@ public final class Machine {
     public var exceptions = 0
     public var lastException = ""
 
-    public init(onUart: @escaping (UInt8) -> Void, onLog: @escaping (String) -> Void) {
+    public init(onUart: @escaping (UInt8) -> Void, onLog: @escaping (String) -> Void, definition: MachineDefinition) {
         self.onUart = onUart
         self.onLog = onLog
+        self.definition = definition
     }
 
     public func reset() {
@@ -147,7 +143,7 @@ public final class Machine {
 
     // MARK: - Physical memory
 
-    func isRam(_ addr: UInt64) -> Bool { addr >= DRAM_BASE && addr < DRAM_END }
+    func isRam(_ addr: UInt64) -> Bool { addr >= definition.dramBase && addr < definition.dramEnd }
 
     func pageFor(_ addr: UInt64, _ create: Bool) -> Page? {
         let key = Int64(addr >> 12)
@@ -176,9 +172,9 @@ public final class Machine {
     }
 
     func mmioRead(_ addr: UInt64) -> UInt64 {
-        if addr >= UART_BASE && addr < UART_BASE + 0x1000 {
-            if addr - UART_BASE == UART_UTRSTAT { return 0x6 | (uartRxQueue.isEmpty ? 0 : 1) }
-            if addr - UART_BASE == UART_URXH { return uartRxQueue.isEmpty ? 0 : UInt64(uartRxQueue.removeFirst()) }
+        if addr >= definition.uartBase && addr < definition.uartBase &+ definition.uartSize {
+            if addr - definition.uartBase == definition.uartUtrstat { return 0x6 | (uartRxQueue.isEmpty ? 0 : 1) }
+            if addr - definition.uartBase == definition.uartUrxh { return uartRxQueue.isEmpty ? 0 : UInt64(uartRxQueue.removeFirst()) }
             return 0
         }
         noteMmio(addr)
@@ -186,8 +182,8 @@ public final class Machine {
     }
 
     func mmioWrite(_ addr: UInt64, _ val: UInt64) {
-        if addr >= UART_BASE && addr < UART_BASE + 0x1000 {
-            if addr - UART_BASE == UART_UTXH { onUart(UInt8(val & 0xFF)) }
+        if addr >= definition.uartBase && addr < definition.uartBase &+ definition.uartSize {
+            if addr - definition.uartBase == definition.uartUtxh { onUart(UInt8(val & 0xFF)) }
             return
         }
         noteMmio(addr)

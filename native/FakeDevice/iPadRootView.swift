@@ -110,10 +110,11 @@ struct iPadRootView: View {
             HStack {
                 Text("Translator pack").font(.headline)
                 Spacer()
+                Link("Download", destination: DownloadLinks.translatorPack)
                 Button("Import") { importingPack = true }
             }
             if vm.packs.isEmpty {
-                Text("No translator pack yet. Import translator-pack-iphone11.json, or drop it into this app's folder in Files — the app ships without a machine definition; the pack is the fake hardware, as data.")
+                Text("No translator pack yet. Download translator-pack-iphone11.json (this project's own data file) and import it, or drop it into this app's folder in Files — the app ships without a machine definition; the pack is the fake hardware, as data.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
@@ -157,10 +158,11 @@ struct iPadRootView: View {
             HStack {
                 Text("Kernel files").font(.headline)
                 Spacer()
+                Link("Get from Apple", destination: DownloadLinks.kernelFirmwareListing)
                 Button("Import") { importing = true }
             }
             if vm.kernels.isEmpty {
-                Text("No kernel files yet. Import kernelcache.raw (iOS 14.8, iPhone 11), or drop it into this app's folder in Files — file sharing is on.")
+                Text("No kernel files yet. The kernel is Apple's binary and is never hosted by this project: download the iPhone 11 (iPhone12,1) iOS 14.8 IPSW from Apple's servers via the ipsw.me listing, extract kernelcache.raw from it, and import it here — or drop it into this app's folder in Files; file sharing is on.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             } else {
