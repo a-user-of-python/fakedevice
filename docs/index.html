@@ -1,0 +1,2430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FakeDevice — XNU in a browser tab</title>
+<style>
+  body { background:#101216; color:#e8eaf0; font-family:-apple-system, system-ui, sans-serif; margin:0; padding:16px; line-height:1.45; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  h2 { font-size:17px; margin:22px 0 6px; }
+  p { max-width:70ch; }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin:12px 0; }
+  button, a.btn { background:#2b6cb0; color:#fff; border:0; border-radius:8px; padding:10px 16px; font-size:16px; cursor:pointer; text-decoration:none; display:inline-block; }
+  button.secondary { background:#3a4152; }
+  button:active, a.btn:active { filter:brightness(1.2); }
+  button:disabled { opacity:.45; cursor:default; }
+  input[type=file] { font-size:15px; }
+  pre { background:#05070a; border:1px solid #2a2f3a; border-radius:8px; padding:10px; overflow:auto; white-space:pre-wrap; word-break:break-word; font-family:ui-monospace, Menlo, monospace; font-size:13px; }
+  #uart { min-height:90px; color:#9fe8a9; }
+  #status { color:#ffd479; }
+  #bdout { min-height:140px; max-height:320px; color:#c9d6ff; }
+  #bdin { flex:1; min-width:220px; background:#05070a; color:#fff; border:1px solid #2a2f3a; border-radius:8px; padding:10px; font-family:ui-monospace, Menlo, monospace; font-size:15px; }
+  code { background:#1b1f27; padding:1px 5px; border-radius:4px; }
+  .small { color:#a7b0c0; font-size:14px; }
+  .ok { color:#9fe8a9; }
+  .warn { color:#ffd479; }
+  #dropzone { border:2px dashed #3a4152; border-radius:8px; padding:14px; margin:12px 0; max-width:70ch; }
+  #dropzone.drag { border-color:#2b6cb0; background:#1b1f27; }
+</style>
+</head>
+<body>
+<h1>FakeDevice — XNU in a browser tab</h1>
+<p>A lightweight fake iPhone (t8030) that runs the <b>real iOS kernel</b> — the actual
+<code>kernelcache</code> file, not converted, not recompiled — interpreted instruction by
+instruction right here in this tab. The fake BootROM checks the image, the fake LLB brings
+up memory, and the fake iBoot loads the real kernel and jumps to it, the same handoffs a
+real iPhone makes (BootROM &#8594; LLB &#8594; iBoot &#8594; kernel).</p>
+
+<h2>Auto download</h2>
+<p>Like the FakeDevice apps, this page keeps everything separate — and fetches what it can
+by itself. When the page opened, it <b>downloaded the iPhone 11 translator pack from this
+site automatically</b> and loaded it (the pack is the whole fake machine — memory map,
+serial port, CPU layout, boot settings — as data; watch the machine log below).</p>
+<p>The kernel is the one piece the page cannot pull by itself: it lives inside Apple's
+iOS 14.8 update file (the IPSW), and Apple's servers don't give web pages permission to
+reach inside that file — the page tried, and the browser blocks it. So the working path is
+one extra step, with the page doing all the unwrapping:</p>
+<div class="row">
+  <a class="btn" id="ipswlink" href="https://updates.cdn-apple.com/2021FallFCS/fullrestores/071-97929/2567B0BA-F9C0-4181-9D2B-E4535D65518B/iPhone11,8,iPhone12,1_14.8_18H17_Restore.ipsw">Download the iOS 14.8 IPSW from Apple (about 6 GB)</a>
+</div>
+<div id="dropzone">
+  <div class="row">
+    <input type="file" id="kfile">
+  </div>
+  <p class="small" style="margin:0">…then drop the downloaded IPSW here (or pick it with the
+  file button). The page extracts the kernelcache itself, in this tab: it unpacks the ZIP,
+  unwraps the IM4P container, and LZFSE-decodes it with a small WebAssembly build of Apple's
+  own LZFSE decoder — then checks the result against the genuine kernel's SHA-256
+  fingerprint before booting it. You can also drop a <code>kernelcache.release</code> file
+  (IM4P) or an already-extracted <code>kernelcache.raw</code> directly. Nothing ever leaves
+  your device — the page reads everything locally.</p>
+</div>
+<p class="small">Translator pack: <span id="packstatus">loading…</span><br>
+Kernel: <span id="kstatus">not loaded yet</span><br>
+Import a different translator pack instead: <input type="file" id="packfile"></p>
+
+<h2>Where the boot stands</h2>
+<p>This build runs the real kernel <b>past 200 million instructions with zero exceptions</b> —
+the fake CPU hands every fault to the kernel's own exception handlers, the way real hardware
+does. The kernel then settles into a wait loop: the leading suspect is timer interrupts,
+which the fake machine doesn't generate yet. The serial pane stays empty — the console still
+isn't awake that early — and this is <b>not a full boot</b> yet. Finding and fixing what the
+kernel is waiting for is the current job.</p>
+<p><b>The backdoor</b> (below) is open access straight into the fake phone: inspect or change
+any memory or register, set breakpoints, single-step, patch instructions on the fly, or type
+into its serial port. The same machine is also exposed to this tab's JavaScript console as
+<code>window.fakedevice</code>.</p>
+
+<h2>Run it</h2>
+<div class="row">
+  <button id="selftest">Run the self-test</button>
+  <span class="small">Built-in tiny ARM64 program — proves the fake CPU works. No file needed.</span>
+</div>
+<div class="row">
+  <button id="boot">Boot the kernel</button>
+  <button id="pause" class="secondary">Pause</button>
+  <span class="small">Boots the kernel the page has extracted or you picked above.</span>
+</div>
+
+<h2>Serial output (the fake phone's UART)</h2>
+<pre id="uart"></pre>
+<h2>Status</h2>
+<pre id="status">No machine yet. Run the self-test or boot the kernel.</pre>
+<h2>Machine log</h2>
+<pre id="log"></pre>
+
+<h2>Backdoor console</h2>
+<pre id="bdout">Backdoor ready. Type "help" and press Enter.
+All numbers are hex. peek/poke go through the kernel's page tables (what the
+kernel sees); peekp/pokep touch raw physical memory.</pre>
+<div class="row">
+  <input id="bdin" type="text" placeholder="help" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button id="bdrun">Run command</button>
+</div>
+<p class="small">Commands: <code>help</code> · <code>status</code> · <code>regs</code> ·
+<code>sysregs</code> · <code>peek &lt;addr&gt; [len]</code> · <code>peekp &lt;addr&gt; [len]</code> ·
+<code>poke &lt;addr&gt; &lt;hexbytes&gt;</code> · <code>pokep &lt;addr&gt; &lt;hexbytes&gt;</code> ·
+<code>setreg &lt;x0..x30|sp|pc&gt; &lt;value&gt;</code> · <code>bp &lt;addr&gt;</code> ·
+<code>bplist</code> · <code>bpclear</code> · <code>step [n]</code> · <code>run [n]</code> ·
+<code>patch &lt;addr&gt; &lt;instruction-word&gt;</code> · <code>mmio</code> ·
+<code>uartin &lt;text&gt;</code> · <code>lastpc</code></p>
+<p class="small">Source, the translator pack and the native FakeDevice apps:
+<a href="https://github.com/a-user-of-python/fakedevice" style="color:#7db3e8">github.com/a-user-of-python/fakedevice</a>.
+The LZFSE decoder in this page is Apple's reference implementation (BSD licence, Apple Inc.)
+compiled to WebAssembly.</p>
+
+<script>
+"use strict";
+/*
+ * FakeDevice — a light ARM64 (AArch64) interpreter + fake iPhone hardware,
+ * built to run the real iOS kernel (XNU) unconverted in a browser tab.
+ *
+ * Stage 1: integer ARMv8 subset, paged RAM, Apple-style UART (t8030 map),
+ * stub MMIO elsewhere, system-register stubs. Anything unimplemented stops
+ * the machine with a fault readout (PC + raw word) — that readout is the
+ * work list for the next stage.
+ */
+const M64 = 0xFFFFFFFFFFFFFFFFn;
+const M128 = (1n << 128n) - 1n;
+const DRAM_BASE = 0x800000000n;
+const DRAM_END = 0x1000000000n;
+const UART_BASE = 0x235200000n;            // t8030 (iPhone 11) UART0
+const UART_UTRSTAT = 0x10n, UART_UTXH = 0x20n, UART_URXH = 0x24n;
+
+function createMachine(onUart, onLog) {
+  const pages = new Map();
+  const x = new Array(31).fill(0n);
+  const v = new Array(32).fill(0n);          // AdvSIMD/FP registers, 128-bit each
+  let sp = 0n, pc = 0n;
+  let N = 0, Z = 0, C = 0, V = 0;
+  let icount = 0;
+  let status = "ready";                    // ready|halted|trap|undefined|wfi
+  let trapInfo = "";
+  let mmuOn = false;
+  const sysregs = new Map();
+  const uartRxQueue = [];                  // bytes the backdoor typed "into" the fake phone's serial port
+  const tlb = new Map();                   // VA 4K-slice -> PA slice base, valid while the MMU is on
+  const mmioLog = new Map();
+  const breakpoints = new Set();           // PC values (hex strings) — backdoor
+  const pcRing = new Array(64).fill(0n);   // last PCs, for fault readouts
+  let pcRingIdx = 0;
+  let zvaSize = 64;                        // DC ZVA block size (matches DCZID_EL0 stub)
+
+  // Stage-3 optimization: numeric page keys (string keys cost a BigInt
+  // toString + hash per byte accessed) plus a 1-entry last-page cache —
+  // consecutive accesses overwhelmingly hit the same 4K page.
+  let lpKey = -1, lpPage = undefined;
+  function pageFor(addr, create) {
+    const key = Number(addr >> 12n);
+    if (key === lpKey) {
+      if (lpPage !== undefined) return lpPage;
+      if (!create) return undefined;
+      lpPage = new Uint8Array(4096); pages.set(key, lpPage);
+      return lpPage;
+    }
+    let p = pages.get(key);
+    if (p === undefined && create) { p = new Uint8Array(4096); pages.set(key, p); }
+    lpKey = key; lpPage = p;
+    return p;
+  }
+  function isRam(addr) { return addr >= DRAM_BASE && addr < DRAM_END; }
+  function mmioRead(addr) {
+    if (addr >= UART_BASE && addr < UART_BASE + 0x1000n) {
+      if (addr - UART_BASE === UART_UTRSTAT) return 0x6n | (uartRxQueue.length ? 1n : 0n);   // TX ready + RX-ready bit when the backdoor queued input
+      if (addr - UART_BASE === UART_URXH) return BigInt(uartRxQueue.length ? uartRxQueue.shift() : 0);
+      return 0n;
+    }
+    const k = "0x" + addr.toString(16);
+    mmioLog.set(k, (mmioLog.get(k) || 0) + 1);
+    return 0n;
+  }
+  function mmioWrite(addr, val) {
+    if (addr >= UART_BASE && addr < UART_BASE + 0x1000n) {
+      if (addr - UART_BASE === UART_UTXH) onUart(Number(val & 0xFFn));
+      return;
+    }
+    const k = "0x" + addr.toString(16);
+    mmioLog.set(k, (mmioLog.get(k) || 0) + 1);
+  }
+  function readPhys(addr, size) {
+    if (!isRam(addr)) return mmioRead(addr);
+    const off = Number(addr & 0xFFFn);
+    if (off + size <= 4096) {                       // fast path: within one page
+      const p = pageFor(addr, false);
+      if (!p) return 0n;
+      let v = 0n;
+      for (let i = size - 1; i >= 0; i--) v = (v << 8n) | BigInt(p[off + i]);
+      return v;
+    }
+    let v = 0n;
+    for (let i = size - 1; i >= 0; i--) {
+      const a = addr + BigInt(i), p = pageFor(a, false);
+      v = (v << 8n) | BigInt(p ? p[Number(a & 0xFFFn)] : 0);
+    }
+    return v;
+  }
+  function writePhys(addr, val, size) {
+    if (!isRam(addr)) { mmioWrite(addr, val); return; }
+    const off = Number(addr & 0xFFFn);
+    if (off + size <= 4096) {                       // fast path: within one page
+      const p = pageFor(addr, true);
+      for (let i = 0; i < size; i++) p[off + i] = Number((val >> BigInt(8 * i)) & 0xFFn);
+      return;
+    }
+    for (let i = 0; i < size; i++) {
+      const a = addr + BigInt(i), p = pageFor(a, true);
+      p[Number(a & 0xFFFn)] = Number((val >> BigInt(8 * i)) & 0xFFn);
+    }
+  }
+
+  // ---- stage 3: real page-table walking, driven by the kernel's own
+  // TTBR0_EL1 / TTBR1_EL1 / TCR_EL1 values. No identity tricks: if the
+  // kernel's tables don't map an address, the access faults, like hardware.
+  // ---- stage 4: exception delivery. When the kernel has programmed
+  // VBAR_EL1, a translation fault or an undefined instruction inside step()
+  // is delivered to the kernel's own vector (VBAR + 0x400, sync from EL1)
+  // with ESR/FAR/ELR/SPSR set the way hardware sets them, instead of
+  // stopping the machine. Before VBAR exists (very early boot) a fault
+  // stops the machine exactly as it did in stages 1–3.
+  let accessWrite = false, accessFetch = false;   // set around translate() calls
+  let inStep = false, curInsnPc = 0n;
+  let excCount = 0, lastExc = "";
+  let quietWalk = false, lastWalkLevel = 3;       // AT instructions: walk without faulting
+  function vbarArmed() { return (sysregs.get("3,0,12,0,0") || 0n) !== 0n; }
+  function walkFault(va, level) {
+    lastWalkLevel = level === undefined ? 3 : level;
+    if (quietWalk) return null;
+    const rec = { __fault: true, va, level: lastWalkLevel, write: accessWrite, fetch: accessFetch, undef: false };
+    if (inStep && vbarArmed()) throw rec;
+    if (status === "ready") {
+      status = "trap";
+      trapInfo = "translation fault at VA 0x" + va.toString(16) + " (fetch/data from PC 0x" + pc.toString(16) + ")";
+    }
+    return null;
+  }
+  function deliverException(rec) {
+    const vbar = sysregs.get("3,0,12,0,0") || 0n;
+    if (!vbar) return false;
+    let ec, iss;
+    if (rec.undef) { ec = 0x00n; iss = 0n; }                       // unknown reason
+    else {
+      ec = rec.fetch ? 0x21n : 0x25n;                              // instruction / data abort, current EL
+      iss = BigInt(0x04 + rec.level) | (rec.write && !rec.fetch ? (1n << 24n) : 0n);   // FSC: translation fault at level; WnR
+    }
+    sysregs.set("3,0,5,2,0", (ec << 26n) | (1n << 25n) | iss);     // ESR_EL1 (IL=1)
+    sysregs.set("3,0,6,0,0", rec.undef ? 0n : rec.va);             // FAR_EL1
+    sysregs.set("3,0,4,0,1", rec.elr);                             // ELR_EL1
+    const nzcv = (BigInt(N) << 31n) | (BigInt(Z) << 30n) | (BigInt(C) << 29n) | (BigInt(V) << 28n);
+    const panBit = ((sysregs.get("3,0,4,2,3") || 0n) & 1n) << 22n;   // SPSR_EL1.PAN = current PAN (stage-5 frontier 18)
+    sysregs.set("3,0,4,0,0", nzcv | panBit | (0b1111n << 6n) | 0b0101n);    // SPSR_EL1: NZCV+PAN saved, DAIF masked, EL1h
+    pc = vbar + 0x200n;   // sync exception from EL1 using SP_EL1 (the kernel's own mode)
+    excCount++;
+    lastExc = (rec.undef ? "undefined instruction" : (rec.fetch ? "instruction abort" : "data abort") +
+      " at VA 0x" + rec.va.toString(16)) + ", ELR 0x" + rec.elr.toString(16) + " -> vector 0x" + pc.toString(16);
+    return true;
+  }
+  function walkTables(va) {
+    const tcr = sysregs.get("3,0,2,0,2") || 0n;                       // TCR_EL1
+    const t0sz = Number(tcr & 0x3Fn), t1sz = Number((tcr >> 16n) & 0x3Fn);
+    const tg0 = Number((tcr >> 14n) & 3n), tg1 = Number((tcr >> 30n) & 3n);
+    const g0 = tg0 === 1 ? 16 : tg0 === 2 ? 14 : 12;                  // TG0: 00=4K 01=64K 10=16K
+    const g1 = tg1 === 2 ? 12 : tg1 === 3 ? 16 : 14;                  // TG1: 01=16K 10=4K 11=64K
+    const vaBits1 = 64 - t1sz;
+    const isT1 = t1sz > 0 && (va >> BigInt(vaBits1)) === (1n << BigInt(t1sz)) - 1n;
+    let g, ttbr;
+    if (isT1) {
+      if ((tcr >> 23n) & 1n) return walkFault(va, 0);                 // EPD1: TTBR1 walks disabled
+      g = g1;
+      ttbr = sysregs.get("3,0,2,0,1") || 0n;                          // TTBR1_EL1
+    } else {
+      if (va >= (1n << BigInt(64 - t0sz))) return walkFault(va, 0);
+      if ((tcr >> 7n) & 1n) return walkFault(va, 0);                  // EPD0
+      g = g0;
+      ttbr = sysregs.get("3,0,2,0,0") || 0n;                          // TTBR0_EL1
+    }
+    const vaBits = isT1 ? vaBits1 : 64 - t0sz;
+    const stride = g - 3;                                             // index bits per level
+    const levels = Math.max(1, Math.ceil((vaBits - g) / stride));
+    let table = ttbr & ((1n << 48n) - 1n) & ~((1n << BigInt(g)) - 1n);
+    for (let L = 4 - levels; L <= 3; L++) {
+      const shift = g + stride * (3 - L);
+      // At the initial level only (vaBits - shift) index bits are real;
+      // the bits above vaBits are the TTBR1 sign-extension ones and the
+      // hardware ignores them. Deeper levels always use the full stride.
+      const idxBits = Math.min(stride, vaBits - shift);
+      if (idxBits <= 0) return walkFault(va, L);
+      const idx = (va >> BigInt(shift)) & ((1n << BigInt(idxBits)) - 1n);
+      const desc = readPhys(table + idx * 8n, 8);
+      const type = desc & 3n;
+      if (type === 0n) return walkFault(va, L);                       // invalid descriptor
+      if (L === 3) {
+        if (type !== 3n) return walkFault(va, 3);
+        return (desc & ((1n << 48n) - (1n << BigInt(g)))) | (va & ((1n << BigInt(g)) - 1n));
+      }
+      if (type === 1n) {                                              // block descriptor
+        return (desc & ((1n << 48n) - 1n) & ~((1n << BigInt(shift)) - 1n)) | (va & ((1n << BigInt(shift)) - 1n));
+      }
+      if (type === 3n) {                                              // table descriptor
+        table = desc & ((1n << 48n) - 1n) & ~((1n << BigInt(g)) - 1n);
+        continue;
+      }
+      return walkFault(va, L);                                        // reserved encoding
+    }
+    return walkFault(va, 3);
+  }
+  let tlbVa = -1, tlbPa = 0n;                 // 1-entry TLB cache on top of the Map
+  function flushTlb() { tlb.clear(); tlbVa = -1; fetchPaBase = -1n; fetchPage = null; }
+  function translate(va) {
+    const key = Number(va >> 12n);              // numeric key (was a string: slow)
+    if (key === tlbVa) return tlbPa + (va & 0xFFFn);
+    const hit = tlb.get(key);
+    if (hit !== undefined) { tlbVa = key; tlbPa = hit; return hit + (va & 0xFFFn); }
+    const pa = walkTables(va);
+    if (pa === null) return null;
+    const base = pa & ~0xFFFn;
+    tlb.set(key, base);
+    tlbVa = key; tlbPa = base;
+    return pa;
+  }
+  function readMem(addr, size) {
+    if (mmuOn) {
+      accessWrite = false;
+      const pa = translate(addr);
+      if (pa === null) return 0n;
+      return readPhys(pa, size);
+    }
+    return readPhys(addr, size);
+  }
+  function writeMem(addr, val, size) {
+    if (mmuOn) {
+      accessWrite = true;
+      const pa = translate(addr);
+      if (pa === null) return;
+      writePhys(pa, val, size);
+      return;
+    }
+    writePhys(addr, val, size);
+  }
+  function readV(addr, bytes) {              // vector load: little-endian, zero-extended by caller
+    if (bytes === 16) return readMem(addr, 8) | (readMem(addr + 8n, 8) << 64n);
+    return readMem(addr, bytes);
+  }
+  function writeV(addr, val, bytes) {        // vector store: low `bytes` of val
+    if (bytes === 16) { writeMem(addr, val & M64, 8); writeMem(addr + 8n, (val >> 64n) & M64, 8); return; }
+    writeMem(addr, val, bytes);
+  }
+  function loadBytes(addr, bytes) {
+    // bulk path for RAM (kernel images are tens of MB)
+    if (isRam(addr) && isRam(addr + BigInt(bytes.length - 1))) {
+      let off = 0;
+      while (off < bytes.length) {
+        const a = addr + BigInt(off);
+        const p = pageFor(a, true);
+        const po = Number(a & 0xFFFn);
+        const n = Math.min(4096 - po, bytes.length - off);
+        if (bytes.subarray) p.set(bytes.subarray(off, off + n), po);
+        else for (let i = 0; i < n; i++) p[po + i] = bytes[off + i];
+        off += n;
+      }
+      return;
+    }
+    for (let i = 0; i < bytes.length; i++) writeMem(addr + BigInt(i), BigInt(bytes[i]), 1);
+  }
+
+  function getReg(i, isSP) { return i === 31 ? (isSP ? sp : 0n) : x[i]; }
+  function setReg(i, val, isSP) {
+    val &= M64;
+    if (i === 31) { if (isSP) sp = val; return; }
+    x[i] = val;
+  }
+  function sext(val, bits) {
+    if ((val >> BigInt(bits - 1)) & 1n) return (val | (M64 ^ ((1n << BigInt(bits)) - 1n))) & M64;
+    return val & M64;
+  }
+  function shiftReg(val, type, amt, bits) {
+    const mask = bits === 64 ? M64 : 0xFFFFFFFFn;
+    val &= mask;
+    amt &= (bits - 1);
+    if (type === 0) return (val << BigInt(amt)) & mask;                    // LSL
+    if (type === 1) return val >> BigInt(amt);                             // LSR
+    if (type === 2) return (sext(val, bits) >> BigInt(amt)) & mask;        // ASR
+    if (amt === 0) return val;                                             // ROR
+    return ((val >> BigInt(amt)) | (val << BigInt(bits - amt))) & mask;
+  }
+  function flagsAdd(a, b, r, bits) {
+    const mask = bits === 64 ? M64 : 0xFFFFFFFFn, sign = bits === 64 ? 0x8000000000000000n : 0x80000000n;
+    N = (r & sign) ? 1 : 0; Z = ((r & mask) === 0n) ? 1 : 0;
+    C = (r > mask || (a & mask) + (b & mask) > mask) ? 1 : 0;
+    V = ((~(a ^ b) & (a ^ r)) & sign) ? 1 : 0;
+    // carry recomputed exactly:
+    C = (((a & mask) + (b & mask)) >> BigInt(bits)) & 1n ? 1 : 0;
+  }
+  function flagsSub(a, b, r, bits) {
+    const mask = bits === 64 ? M64 : 0xFFFFFFFFn, sign = bits === 64 ? 0x8000000000000000n : 0x80000000n;
+    N = (r & sign) ? 1 : 0; Z = ((r & mask) === 0n) ? 1 : 0;
+    C = ((a & mask) >= (b & mask)) ? 1 : 0;
+    V = (((a ^ b) & (a ^ r)) & sign) ? 1 : 0;
+  }
+  function flagsLogic(r, bits) {
+    const sign = bits === 64 ? 0x8000000000000000n : 0x80000000n;
+    N = (r & sign) ? 1 : 0; Z = (r === 0n) ? 1 : 0; C = 0; V = 0;
+  }
+  function condHolds(cond) {
+    let r;
+    switch (cond >> 1) {
+      case 0: r = Z === 1; break;
+      case 1: r = C === 1; break;
+      case 2: r = N === 1; break;
+      case 3: r = V === 1; break;
+      case 4: r = C === 1 && Z === 0; break;
+      case 5: r = N === V; break;
+      case 6: r = N === V && Z === 0; break;
+      default: r = true;
+    }
+    return (cond & 1) && cond !== 15 ? !r : r;
+  }
+  function decodeBitmask(Nbit, immr, imms, bits) {
+    let len = 0;
+    if (Nbit) len = 6;
+    else {
+      for (let i = 5; i >= 1; i--) if (((imms >> i) & 1) === 0) { len = i; break; }
+      if (!len) return null;
+    }
+    const esize = 1 << len;
+    if (esize > bits) return null;
+    const levels = esize - 1, s = imms & levels, r = immr & levels;
+    if (s === levels) return null;
+    let welem = (1n << BigInt(s + 1)) - 1n;
+    if (r) welem = ((welem >> BigInt(r)) | (welem << BigInt(esize - r))) & ((1n << BigInt(esize)) - 1n);
+    let out = 0n;
+    for (let i = 0; i < bits; i += esize) out |= welem << BigInt(i);
+    return out & (bits === 64 ? M64 : 0xFFFFFFFFn);
+  }
+
+  function sysKey(op0, op1, crn, crm, op2) { return op0 + "," + op1 + "," + crn + "," + crm + "," + op2; }
+  function mrs(op0, op1, crn, crm, op2) {
+    switch (sysKey(op0, op1, crn, crm, op2)) {
+      case "3,0,0,0,0": return 0x611F01A0n;              // MIDR_EL1 (stub value)
+      case "3,0,0,0,5": return 0n;                       // MPIDR_EL1: boot core 0
+      case "3,0,4,2,2": return 4n;                       // CurrentEL = EL1
+      case "3,3,0,0,1": return 0x8444C004n;              // CTR_EL0 (plausible)
+      case "3,0,0,4,0": return 0x111111n;                // ID_AA64PFR0_EL1 (plausible)
+      case "3,3,13,0,2": return BigInt(icount) * 41n;    // CNTPCT_EL0: fake timer
+      case "3,3,0,0,7": return 4n;                       // DCZID_EL0: 64-byte ZVA blocks, allowed
+      case "3,3,14,0,0": return 24000000n;               // CNTFRQ_EL0: 24 MHz
+      case "3,4,15,0,4":                                 // Apple core register S3_4_C15_C0_4:
+        // XNU's start path polls bit 1 ("core ready") before programming the
+        // TTBRs and turning the MMU on, then read-modify-writes config bits.
+        // Model a powered, ready core: bit 1 always reads 1, writes stick.
+        return (sysregs.get("3,4,15,0,4") || 0n) | 2n;
+      default: return sysregs.get(sysKey(op0, op1, crn, crm, op2)) || 0n;
+    }
+  }
+  function msr(op0, op1, crn, crm, op2, val) {
+    const k = sysKey(op0, op1, crn, crm, op2);
+    sysregs.set(k, val & M64);
+    if (k === "3,0,2,0,0" || k === "3,0,2,0,1" || k === "3,0,2,0,2") flushTlb();   // TTBR0/TTBR1/TCR changed
+    if (k === "3,0,1,0,0") {                                                        // SCTLR_EL1
+      const on = (val & 1n) !== 0n;
+      if (on && !mmuOn) onLog("kernel set SCTLR_EL1.M — MMU on; addresses now translate through the kernel's own page tables");
+      if (on !== mmuOn) { mmuOn = on; flushTlb(); }
+    }
+  }
+
+  function undef(insn) {
+    if (inStep && vbarArmed()) throw { __fault: true, undef: true, insn, va: 0n, level: 3, write: false, fetch: false };
+    status = "undefined";
+    trapInfo = "undefined instruction 0x" + insn.toString(16).padStart(8, "0") + " at PC 0x" + pc.toString(16);
+    return false;
+  }
+  function trap(kind, info) {
+    status = "trap";
+    trapInfo = kind + " at PC 0x" + pc.toString(16) + (info ? " (" + info + ")" : "");
+    return false;
+  }
+
+  let fetchPage = null, fetchPaBase = -1n;  // cached fetch page: PA base + Uint8Array
+  function fetchInsn() {
+    // Fast path: instruction fetch is sequential, so the same 4K page serves
+    // ~1024 fetches. Read the 4 bytes straight out of the page array instead
+    // of going through readMem -> translate -> readPhys per instruction.
+    // Falls back to the slow readMem path on page crossing, non-RAM, or fault.
+    let pa;
+    if (mmuOn) {
+      accessFetch = true;
+      try { pa = translate(pc); } finally { accessFetch = false; }
+      if (pa === null) return null;              // walkFault already set status
+    } else pa = pc;
+    if (!isRam(pa) || (pa & 0xFFFn) > 4092n) return Number(readMem(pc, 4));
+    const base = pa & ~0xFFFn;
+    if (base !== fetchPaBase) { fetchPage = pageFor(pa, false); fetchPaBase = base; }
+    if (!fetchPage) return 0;                    // untouched RAM page reads as zero
+    const o = Number(pa & 0xFFFn);
+    return (fetchPage[o] | (fetchPage[o + 1] << 8) | (fetchPage[o + 2] << 16) | (fetchPage[o + 3] << 24)) >>> 0;
+  }
+  function step() {
+    curInsnPc = pc;
+    inStep = true;
+    try {
+      return stepBody();
+    } catch (e) {
+      if (e && e.__fault) {
+        e.elr = curInsnPc;
+        if (deliverException(e)) { status = "ready"; return true; }
+        status = "trap";
+        trapInfo = e.undef
+          ? "undefined instruction, and VBAR_EL1 is not set yet — nowhere to deliver it"
+          : "translation fault at VA 0x" + e.va.toString(16) + ", and VBAR_EL1 is not set yet — nowhere to deliver it";
+        return false;
+      }
+      throw e;
+    } finally { inStep = false; }
+  }
+  function stepBody() {
+    pcRing[pcRingIdx] = pc; pcRingIdx = (pcRingIdx + 1) & 63;
+    const insn = fetchInsn();
+    if (insn === null) return false;             // fetch faulted (translation) — stop here
+    if (status === "trap") return false;
+    icount++;
+    const nextPc = pc + 4n;
+    const rd = insn & 31, rn = (insn >> 5) & 31, rm = (insn >> 16) & 31;
+    const sf = (insn >>> 31) & 1, bits = sf ? 64 : 32;
+    const wmask = sf ? M64 : 0xFFFFFFFFn;
+
+    // --- exceptions, hints, barriers, sysregs ---
+    if (((insn & 0xFFE0001F) >>> 0) === 0xD4400000) { status = "halted"; trapInfo = "HLT at PC 0x" + pc.toString(16); return false; }
+    if (((insn & 0xFFE0001F) >>> 0) === 0xD4200000) { status = "halted"; trapInfo = "BRK #" + ((insn >> 5) & 0xFFFF) + " at PC 0x" + pc.toString(16); return false; }
+    if (((insn & 0xFFE0001F) >>> 0) === 0xD4000001) return trap("SVC", "#" + ((insn >> 5) & 0xFFFF));
+    if (insn === 0xD69F03E0 || insn === 0xD69F0BFF || insn === 0xD69F0FFF) {   // ERET / ERETAA / ERETAB
+      const spsr = sysregs.get("3,0,4,0,0") || 0n;                            // SPSR_EL1
+      N = Number((spsr >> 31n) & 1n); Z = Number((spsr >> 30n) & 1n);
+      C = Number((spsr >> 29n) & 1n); V = Number((spsr >> 28n) & 1n);
+      sysregs.set("3,0,4,2,3", (spsr >> 22n) & 1n);                          // PAN restored from SPSR_EL1.PAN
+      pc = sysregs.get("3,0,4,0,1") || 0n;                                    // ELR_EL1
+      return true;
+    }
+    if (((insn & 0xFFFFF000) >>> 0) === 0xD5032000) {   // HINT space (mask must clear Rt too: real encodings carry 11111 there)
+      if (((insn >> 5) & 0x7F) === 3) { status = "wfi"; trapInfo = "WFI at PC 0x" + pc.toString(16) + " — CPU idle, waiting for an interrupt"; return false; }
+      pc = nextPc; return true;
+    }
+    if (((insn & 0xFFF0F000) >>> 0) === 0xD5033000) { pc = nextPc; return true; }        // barriers
+    if (((insn & 0xFFC00000) >>> 0) === 0xD5000000) {                                    // MSR/MRS + SYS (TLBI/DC/IC/AT)
+      const L = (insn >> 21) & 1;
+      const op0 = (insn >> 19) & 3, op1 = (insn >> 16) & 7;
+      const crn = (insn >> 12) & 15, crm = (insn >> 8) & 15, op2 = (insn >> 5) & 7;
+      if (!L && crn === 7) {
+        // SYS cache maintenance: Rt (rd field) holds the address for DC ops
+        if (crm === 4 && op2 === 1) {                    // DC ZVA: zero a block — the kernel BSS eraser
+          const a = getReg(rd, false) & ~BigInt(zvaSize - 1);
+          for (let i = 0; i < zvaSize; i += 8) writeMem(a + BigInt(i), 0n, 8);
+        } else if (crm === 8 || crm === 9 || ((crm === 10 || crm === 11) && op2 <= 1)) {
+          // AT S1E1R/W, S1E0R/W, S12*, S1E2*: address translation into PAR_EL1.
+          // AT never faults: the result (or the failure) is reported in PAR_EL1.
+          // The kernel's vtop helper (at s1e1r + mrs par_el1) depends on this.
+          const va = getReg(rd, false);
+          quietWalk = true;
+          const pa = walkTables(va);
+          quietWalk = false;
+          if (pa === null) sysregs.set("3,0,7,4,0", 1n | (BigInt(0x04 + lastWalkLevel) << 1n));  // PAR_EL1: F=1, FSC
+          else sysregs.set("3,0,7,4,0", pa & ~0xFFFn);                                            // PAR_EL1: PA[47:12], F=0
+        }
+        // DC CIVAC/CVAC/CVAU/IVAC, IC IALLU*: no-ops in this model (no data/instruction caches)
+        pc = nextPc; return true;
+      }
+      if (!L && crn === 8) {                             // TLBI *: flush the translation cache
+        flushTlb();
+        pc = nextPc; return true;
+      }
+      if (!L && op0 === 0 && crn === 4 && op1 === 0 && op2 === 4) {
+        // MSR PAN, #imm (PSTATE-field immediate; stage-5 frontier 18).
+        // The generic path below would file this under a nonsense key
+        // and the kernel's rsr("pan") at context switch would read 0
+        // forever -> panic "context switch with PAN disabled". The
+        // immediate lives in the CRm field; PAN is sysreg 3,0,4,2,3.
+        sysregs.set("3,0,4,2,3", BigInt(crm & 1));
+        pc = nextPc; return true;
+      }
+      if (L) setReg(rd, mrs(op0, op1, crn, crm, op2), false);
+      else msr(op0, op1, crn, crm, op2, getReg(rd, false));
+      pc = nextPc; return true;
+    }
+
+    // --- AdvSIMD / FP (stage 3) ---
+    // Vector state is v[0..31], one 128-bit BigInt each. Only the encodings the
+    // kernel actually executes are modelled; the rest still stop as undefined.
+    // This block sits before the integer load/store sections: the SIMD&FP
+    // encoding space (0x3C/0x3D/0xAD families) overlaps their masks.
+    if ((insn & 0x3F000000) === 0x1C000000) {
+      // LDR (literal, SIMD&FP): bits[29:24] = 011100 (V=1). The integer LDR
+      // literal mask used to claim these too and loaded the constant pool
+      // into a GPR (0x9CFFF7C1 in strlen -> X1 = 0x03020100 corruption).
+      const opc = (insn >>> 30) & 3;
+      if (opc === 3) return undef(insn);
+      const bytes = opc === 0 ? 4 : opc === 1 ? 8 : 16;
+      let imm = BigInt((insn >> 5) & 0x7FFFF);
+      if (imm & 0x40000n) imm |= ~0x7FFFFn;
+      v[rd] = readV((pc + (imm << 2n)) & M64, bytes) & M128;
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3F000000) === 0x3C000000 || (insn & 0x3F000000) === 0x3D000000) {
+      // LDR / STR (SIMD&FP), single register
+      const size = (insn >>> 30) & 3, opc = (insn >>> 22) & 3;
+      const bytes = (size === 0 && opc >= 2) ? 16 : (1 << size);
+      const isLoad = (opc & 1) === 1;
+      const base = getReg(rn, true);
+      let addr;
+      if ((insn & 0x00200000) !== 0) {                                    // register offset
+        const rm = (insn >> 16) & 31, opt = (insn >> 13) & 7, sh = (insn >> 12) & 1;
+        let off = getReg(rm, false);
+        if (opt === 2) off &= 0xFFFFFFFFn;                                // UXTW
+        else if (opt === 6) { off &= 0xFFFFFFFFn; if (off & 0x80000000n) off |= ~0xFFFFFFFFn; } // SXTW
+        if (sh) off <<= BigInt(bytes === 16 ? 4 : size);
+        addr = base + off;
+      } else if ((insn & 0x3F000000) === 0x3D000000) {                   // unsigned offset
+        addr = base + BigInt(((insn >> 10) & 0xFFF) * bytes);
+      } else {                                                            // unscaled / post / pre
+        let imm = BigInt((insn >> 12) & 0x1FF);
+        if (imm & 0x100n) imm |= ~0x1FFn;
+        const mode = (insn >> 10) & 3;
+        if (mode === 0) addr = base + imm;
+        else if (mode === 1) { addr = base; setReg(rn, base + imm, true); }
+        else if (mode === 3) { addr = base + imm; setReg(rn, addr, true); }
+        else return undef(insn);
+      }
+      if (isLoad) v[rd] = readV(addr, bytes) & M128;
+      else writeV(addr, v[rd], bytes);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3A000000) === 0x28000000 && ((insn >> 26) & 1) === 1) {
+      // LDP / STP (SIMD&FP) + LDNP / STNP. The guard mask must NOT include
+      // bit 30: opc (bits 31:30) selects S/D/Q, and D pairs (opc 1) have
+      // bit 30 set — the old 0x7A mask made them unmatchable and they fell
+      // through to the integer pair block's "SIMD pairs: later" undef
+      // (stage-5 frontier 12: stp d9, d8, [sp, #0xd0]).
+      const opc = (insn >>> 30) & 3;
+      if (opc === 3) return undef(insn);
+      const size = opc === 0 ? 4 : opc === 1 ? 8 : 16;
+      const L = (insn >> 22) & 1, mode = (insn >>> 23) & 7;
+      const rt2 = (insn >> 10) & 31;
+      let imm = BigInt((insn >> 15) & 0x7F);
+      if (imm & 0x40n) imm |= ~0x7Fn;
+      imm *= BigInt(size);
+      const base = getReg(rn, true);
+      let addr;
+      if (mode === 2 || mode === 0) addr = base + imm;                     // offset / non-temporal
+      else if (mode === 3 || mode === 1 || mode === 6 || mode === 7) addr = base + imm;
+      else return undef(insn);
+      const isPre = mode === 3 || mode === 7, isPost = mode === 1 || mode === 5;
+      const a0 = isPost ? base : addr;
+      if (L) { v[rd] = readV(a0, size) & M128; v[rt2] = readV(a0 + BigInt(size), size) & M128; }
+      else { writeV(a0, v[rd], size); writeV(a0 + BigInt(size), v[rt2], size); }
+      if (isPre || isPost) setReg(rn, addr, true);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0F000000 && ((insn >> 19) & 0x1F) === 0 && ((insn >> 10) & 1) === 1) {
+      // MOVI / MVNI (modified immediate). bits[23:19] are always zero in this
+      // group — that is what separates it from the shift-by-immediate group
+      // (SHL/SLI/SSHR...), whose immh field makes them nonzero. cmode 1110 is
+      // the byte-replicated
+      // form and is always MOVI (its bit 29 is not the invert flag).
+      const Q = (insn >>> 30) & 1, cmode = (insn >> 12) & 0xF;
+      const imm8 = (((insn >> 16) & 7) << 5) | ((insn >> 5) & 31);
+      let val;
+      if (cmode === 0xE || cmode === 0xC) {                               // every byte = imm8
+        val = 0n; for (let i = 0; i < 16; i++) val |= BigInt(imm8) << BigInt(i * 8);
+      } else if (cmode === 0xF) {                                         // bit-expanded
+        val = 0n; for (let j = 0; j < 8; j++) if ((imm8 >> j) & 1) val |= 0xFFn << BigInt(j * 8);
+        if (Q) val |= val << 64n;
+      } else if ((cmode & 0x8) === 0) {                                   // 32-bit lanes
+        const e = BigInt(imm8) << BigInt(((cmode >> 1) & 3) * 8);
+        val = e | (e << 32n); if (Q) val |= val << 64n;
+      } else if ((cmode & 0xE) === 0x8) {                                 // 16-bit lanes
+        const e = BigInt(imm8) << BigInt((cmode & 1) * 8);
+        val = 0n; for (let i = 0; i < 4; i++) val |= e << BigInt(i * 16);
+        if (Q) val |= val << 64n;
+      } else return undef(insn);
+      if (cmode !== 0xE && ((insn >> 29) & 1) === 1) val = ~val;          // MVNI
+      v[rd] = val & (Q ? M128 : M64);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0F000000 && ((insn >> 19) & 0xF) !== 0 && ((insn >> 10) & 1) === 1) {
+      // Advanced SIMD shift by immediate (stage-5 frontier 5). The opcode
+      // map (bits 15:11 x U) and the immh:immb size/shift rules were
+      // calibrated against capstone decodes of the full encoding space:
+      //   opc 0 SSHR/USHR    2 SSRA/USRA     4 SRSHR/URSHR   6 SRSRA/URSRA
+      //   opc 8 SRI (U=1)   10 SHL/SLI      12 SQSHLU (U=1) 14 SQSHL/UQSHL
+      //   opc 16 SHRN/SQSHRUN  17 RSHRN/SQRSHRUN  18 SQSHRN/UQSHRN
+      //   opc 19 SQRSHRN/UQRSHRN          20 SSHLL/USHLL
+      // (opc 28/31 are fixed-point FP converts — still unimplemented.)
+      // immh's highest set bit selects esize 8/16/32/64; the 7-bit
+      // immh:immb gives right-shift = 2*esize - imm, left = imm - esize.
+      const U = (insn >>> 29) & 1, Q = (insn >>> 30) & 1;
+      const immh = (insn >> 19) & 0xF, imm = (insn >> 16) & 0x7F, opc = (insn >> 11) & 0x1F;
+      const esize = immh >= 8 ? 64 : immh >= 4 ? 32 : immh >= 2 ? 16 : 8;
+      const eb = BigInt(esize), em = (1n << eb) - 1n, signB = 1n << (eb - 1n);
+      const toS = (x) => (x & signB) !== 0n ? x - (1n << eb) : x;
+      const src = v[rn], dst = v[rd];
+      let result = null;
+      if (opc === 0 || opc === 2 || opc === 4 || opc === 6 || opc === 8) {
+        const s = BigInt(2 * esize - imm);                       // 1..esize
+        const round = 1n << (s - 1n);
+        const lanes = (Q ? 128 : 64) / esize;
+        result = 0n;
+        for (let i = 0; i < lanes; i++) {
+          const a = (src >> BigInt(i * esize)) & em, d = (dst >> BigInt(i * esize)) & em;
+          const shU = a >> s, shS = (toS(a) >> s) & em;
+          const shUR = (a + round) >> s, shSR = ((toS(a) + round) >> s) & em;
+          let out;
+          if (opc === 0) out = U ? shU : shS;                                  // SSHR / USHR
+          else if (opc === 2) out = (d + (U ? shU : shS)) & em;                // SSRA / USRA
+          else if (opc === 4) out = U ? shUR : shSR;                           // SRSHR / URSHR
+          else if (opc === 6) out = (d + (U ? shUR : shSR)) & em;              // SRSRA / URSRA
+          else out = (d & (em ^ ((1n << (eb - s)) - 1n))) | shU;               // SRI: keep top s bits of dst
+          result |= out << BigInt(i * esize);
+        }
+      } else if (opc === 10 || opc === 12 || opc === 14) {
+        const s = BigInt(imm - esize);                                       // 0..esize-1
+        const lanes = (Q ? 128 : 64) / esize;
+        result = 0n;
+        for (let i = 0; i < lanes; i++) {
+          const a = (src >> BigInt(i * esize)) & em, d = (dst >> BigInt(i * esize)) & em;
+          let out;
+          if (opc === 10 && !U) out = (a << s) & em;                           // SHL
+          else if (opc === 10) out = (d & ((1n << s) - 1n)) | ((a << s) & em); // SLI: keep low s bits of dst
+          else if (opc === 12 && U) { const x = toS(a) << s; out = x < 0n ? 0n : x > em ? em : x; }   // SQSHLU
+          else if (opc === 14 && !U) { const x = toS(a) << s; out = (x < -signB ? -signB : x > signB - 1n ? signB - 1n : x) & em; } // SQSHL
+          else if (opc === 14 && U) { const x = a << s; out = x > em ? em : x; }                        // UQSHL
+          else return undef(insn);
+          result |= out << BigInt(i * esize);
+        }
+      } else if (opc >= 16 && opc <= 19) {
+        // narrowing: source lanes are 2*esize wide, shift = 2*esize - imm
+        const s = BigInt(2 * esize - imm), sb = BigInt(2 * esize), sem = (1n << sb) - 1n;
+        const sgn2 = 1n << (sb - 1n), toS2 = (x) => (x & sgn2) !== 0n ? x - (1n << sb) : x;
+        const round = 1n << (s - 1n);
+        const lanes = 64 / esize, srcLanes = Q ? 2 * lanes : lanes;
+        let half = 0n;
+        for (let i = 0; i < srcLanes; i++) {
+          const a = (src >> BigInt(i * 2 * esize)) & sem, sv = toS2(a);
+          let out;
+          if (opc === 16 && !U) out = (a >> s) & em;                                              // SHRN
+          else if (opc === 16) { const x = sv >> s; out = x < 0n ? 0n : x > em ? em : x; }         // SQSHRUN
+          else if (opc === 17 && !U) out = ((a + round) >> s) & em;                               // RSHRN
+          else if (opc === 17) { const x = (sv + round) >> s; out = x < 0n ? 0n : x > em ? em : x; } // SQRSHRUN
+          else if (opc === 18 && !U) { const x = sv >> s; out = (x < -signB ? -signB : x > signB - 1n ? signB - 1n : x) & em; } // SQSHRN
+          else if (opc === 18) { const x = a >> s; out = x > em ? em : x; }                       // UQSHRN
+          else if (!U) { const x = (sv + round) >> s; out = (x < -signB ? -signB : x > signB - 1n ? signB - 1n : x) & em; }     // SQRSHRN
+          else { const x = (a + round) >> s; out = x > em ? em : x; }                             // UQRSHRN
+          half |= out << BigInt(i * esize);
+        }
+        result = Q ? (dst & M64) | (half << 64n) : half;
+      } else if (opc === 20) {
+        // widening: source lanes esize wide, dest lanes 2*esize, shift = imm - esize
+        const s = BigInt(imm - esize), dem = (1n << BigInt(2 * esize)) - 1n;
+        const lanes = 64 / esize, off = Q ? 64 : 0;
+        result = 0n;
+        for (let i = 0; i < lanes; i++) {
+          const a = (src >> BigInt(off + i * esize)) & em;
+          result |= (((U ? a : toS(a)) << s) & dem) << BigInt(i * 2 * esize);
+        }
+      }
+      if (result === null) return undef(insn);
+      v[rd] = result & M128;
+      pc = nextPc; return true;
+    }
+    if ((insn & 0xBF000000) === 0x0C000000 && ((insn >> 21) & 1) === 0) {
+      // Load/store MULTIPLE structures (LD1-LD4 / ST1-ST4, register lists).
+      // Field layout calibrated against capstone from the kernel's own
+      // st2 word: bit 22 = L, bit 23 = post-index present, Rm = post-index
+      // register (31 = immediate, amount = bytes transferred), bits 15:12
+      // select the register count / interleave: 0 = x4, 2 = LD1/ST1 x4,
+      // 4 = x3, 6 = LD1/ST1 x3, 7 = LD1/ST1 x1, 8 = x2, 10 = LD1/ST1 x2.
+      const L = (insn >>> 22) & 1, post = (insn >>> 23) & 1;
+      const rm = (insn >> 16) & 31, opc = (insn >> 12) & 0xF, size = (insn >> 10) & 3;
+      const nregs = opc === 0 || opc === 2 ? 4 : opc === 4 || opc === 6 ? 3 : opc === 7 ? 1 : 2;
+      const nstruct = opc === 0 ? 4 : opc === 4 ? 3 : opc === 8 ? 2 : 1;
+      const Q = (insn >>> 30) & 1, esize = 8 << size, ebytes = esize / 8;
+      const lanes = (Q ? 128 : 64) / esize, em = (1n << BigInt(esize)) - 1n;
+      if (size === 3 && !Q && nregs > 1) return undef(insn);
+      let addr = getReg(rn, true);
+      const total = BigInt(nregs * lanes * ebytes);
+      // element (lane j, register i) sits at memory element j*nstruct + i
+      // for interleaved forms, or i*lanes + j for LD1/ST1 (nstruct = 1:
+      // each register's lanes are contiguous).
+      const elemAddr = (j, i) => addr + BigInt((nstruct === 1 ? i * lanes + j : j * nstruct + i) * ebytes);
+      if (L) {
+        const nv = [];
+        for (let i = 0; i < nregs; i++) nv.push(0n);
+        for (let j = 0; j < lanes; j++) for (let i = 0; i < nregs; i++)
+          nv[i] |= (readV(elemAddr(j, i), ebytes) & em) << BigInt(j * esize);
+        for (let i = 0; i < nregs; i++) v[(rd + i) & 31] = nv[i] & M128;
+      } else {
+        for (let j = 0; j < lanes; j++) for (let i = 0; i < nregs; i++)
+          writeV(elemAddr(j, i), (v[(rd + i) & 31] >> BigInt(j * esize)) & em, ebytes);
+      }
+      if (post) setReg(rn, addr + (rm === 31 ? total : getReg(rm, false)), true);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0E000000 && (insn & 0xF800) === 0x1800 && ((insn >> 21) & 1) === 1) {
+      // three-same LOGICAL: AND/BIC/ORR/ORN (U=0), EOR/BIT/BSL/BIF (U=1).
+      // bit 21 is the three-same template's fixed 1 — the copy group
+      // (DUP/INS/UMOV) shares the rest of this pattern but has bit 21 = 0.
+      const U = (insn >>> 29) & 1, sel = (insn >>> 22) & 3, Q = (insn >>> 30) & 1;
+      const a = v[rn], b = v[rm];
+      let r;
+      if (!U) r = sel === 0 ? a & b : sel === 1 ? a & ~b : sel === 2 ? a | b : a | ~b;
+      else r = sel === 0 ? a ^ b : sel === 1 ? (a & b) | (v[rd] & ~b) : sel === 2 ? (v[rd] & a) | (~v[rd] & b) : (a & ~b) | (v[rd] & b);
+      v[rd] = r & (Q ? M128 : M64);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0E000000 && (insn & 0xF800) === 0x8000 && ((insn >> 21) & 1) === 1) {
+      // ADD / SUB (vector, integer lanes); bit 21 as above
+      const U = (insn >>> 29) & 1, size = (insn >>> 22) & 3, Q = (insn >>> 30) & 1;
+      const esize = 8 << size, lanes = (Q ? 128 : 64) / esize, em = (1n << BigInt(esize)) - 1n;
+      let r = 0n;
+      for (let i = 0; i < lanes; i++) {
+        const a = (v[rn] >> BigInt(i * esize)) & em, b = (v[rm] >> BigInt(i * esize)) & em;
+        r |= ((U ? a - b : a + b) & em) << BigInt(i * esize);
+      }
+      v[rd] = r & M128;
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0E000000 && ((insn >> 21) & 1) === 1 && [13, 15, 25, 27, 29, 35, 37, 39].includes((insn >> 10) & 0x3F)) {
+      // three-same compares / min / max / abs-diff / multiply (lane-wise)
+      const U = (insn >>> 29) & 1, size = (insn >>> 22) & 3, Q = (insn >>> 30) & 1;
+      const opc = (insn >> 10) & 0x3F;
+      const esize = 8 << size, lanes = (Q ? 128 : 64) / esize, em = (1n << BigInt(esize)) - 1n;
+      const signBit = 1n << BigInt(esize - 1);
+      const asS = (val) => (val & signBit) !== 0n ? val - (1n << BigInt(esize)) : val;
+      let r = 0n;
+      for (let i = 0; i < lanes; i++) {
+        const a = (v[rn] >> BigInt(i * esize)) & em, b = (v[rm] >> BigInt(i * esize)) & em;
+        let out;
+        if (opc === 13) out = (U ? a > b : asS(a) > asS(b)) ? em : 0n;                       // CMHI / CMGT
+        else if (opc === 15) out = (U ? a >= b : asS(a) >= asS(b)) ? em : 0n;                // CMHS / CMGE
+        else if (opc === 35) out = (U ? a === b : (a & b) !== 0n) ? em : 0n;                 // CMEQ / CMTST
+        else if (opc === 25) out = (U ? (a > b ? a : b) : (asS(a) > asS(b) ? a : b));         // UMAX / SMAX
+        else if (opc === 27) out = (U ? (a < b ? a : b) : (asS(a) < asS(b) ? a : b));         // UMIN / SMIN
+        else if (opc === 29) { const d = U ? (a > b ? a - b : b - a) : (asS(a) - asS(b)); out = (d < 0n ? -d : d) & em; } // UABD / SABD
+        else if (opc === 37) { const cur = (v[rd] >> BigInt(i * esize)) & em; out = (U ? cur - a * b : cur + a * b) & em; } // MLS / MLA
+        else out = (a * b) & em;                                                             // MUL (39)
+        r |= out << BigInt(i * esize);
+      }
+      v[rd] = r & (Q ? M128 : M64);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0E000000 && ((insn >> 21) & 1) === 1 && [8, 9, 10, 11].includes((insn >> 11) & 0x1F)) {
+      // three-same SHIFT BY REGISTER (stage-5 frontier 13): opc5 8 =
+      // SSHL/USHL, 9 = SQSHL/UQSHL, 10 = SRSHL/URSHL, 11 = SQRSHL/UQRSHL.
+      // Per lane, the shift count is the low byte of the Rm lane as a
+      // signed value: >= 0 shifts left, < 0 shifts right by its negation.
+      const U = (insn >>> 29) & 1, size = (insn >>> 22) & 3, Q = (insn >>> 30) & 1;
+      const opc5 = (insn >> 11) & 0x1F;
+      const esize = 8 << size, lanes = (Q ? 128 : 64) / esize, em = (1n << BigInt(esize)) - 1n;
+      const signBit = 1n << BigInt(esize - 1);
+      const asS = (val) => (val & signBit) !== 0n ? val - (1n << BigInt(esize)) : val;
+      const sat = opc5 === 9 || opc5 === 11, rnd = opc5 === 10 || opc5 === 11;
+      let r = 0n;
+      for (let i = 0; i < lanes; i++) {
+        const a = (v[rn] >> BigInt(i * esize)) & em, b = (v[rm] >> BigInt(i * esize)) & em;
+        let sb = Number(b & 0xFFn); if (sb >= 128) sb -= 256;
+        let out;
+        if (sb >= 0) {
+          if (!sat) out = (a << BigInt(sb)) & em;
+          else if (U) { const x = a << BigInt(sb); out = x > em ? em : x; }
+          else { const x = asS(a) << BigInt(sb); out = (x < -signBit ? -signBit : x > signBit - 1n ? signBit - 1n : x) & em; }
+        } else {
+          const n = BigInt(-sb);
+          if (U) {
+            out = rnd ? ((a + (1n << (n - 1n))) >> n) & em : (a >> n) & em;
+            if (!rnd && n >= BigInt(esize)) out = 0n;
+          } else {
+            const sa = asS(a);
+            if (rnd) out = ((sa + (1n << (n - 1n))) >> n) & em;
+            else out = (n >= BigInt(esize) ? (sa < 0n ? em : 0n) : (sa >> n)) & em;
+          }
+        }
+        r |= out << BigInt(i * esize);
+      }
+      v[rd] = r & (Q ? M128 : M64);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x9F000000) === 0x0E000000 && ((insn >> 17) & 0x1F) === 0x18 && ((insn >> 10) & 3) === 2) {
+      // vector reductions: ADDV / SMINV / UMINV / SMAXV / UMAXV
+      const U = (insn >>> 29) & 1, size = (insn >>> 22) & 3, Q = (insn >>> 30) & 1;
+      const opc = (insn >> 12) & 0x1F;
+      const esize = 8 << size, lanes = (Q ? 128 : 64) / esize, em = (1n << BigInt(esize)) - 1n;
+      const signBit = 1n << BigInt(esize - 1);
+      const asSigned = (val) => (val & signBit) !== 0n ? val - (1n << BigInt(esize)) : val;
+      let r;
+      if (opc === 0x1B) {                                                 // ADDV
+        r = 0n;
+        for (let i = 0; i < lanes; i++) r += (v[rn] >> BigInt(i * esize)) & em;
+        r &= em;
+      } else if (opc === 0x03) {                                          // SADDLV / UADDLV (stage-5 frontier 17)
+        let sum = 0n;
+        for (let i = 0; i < lanes; i++) {
+          const lane = (v[rn] >> BigInt(i * esize)) & em;
+          sum += U ? lane : asSigned(lane);
+        }
+        r = sum & ((1n << BigInt(esize * 2)) - 1n);
+      } else if (opc === 0x1A || opc === 0x0A) {                          // MINV (11010) / MAXV (01010)
+        const isMin = opc === 0x1A;
+        let best = null;
+        for (let i = 0; i < lanes; i++) {
+          const lane = (v[rn] >> BigInt(i * esize)) & em;
+          const key = U ? lane : asSigned(lane);
+          if (best === null || (isMin ? key < best.key : key > best.key)) best = { key, lane };
+        }
+        r = best.lane;
+      } else return undef(insn);
+      v[rd] = r & M128;
+      pc = nextPc; return true;
+    }
+    if (((insn & 0xFFFFFC00) >>> 0) === 0x9E670000) { v[rd] = getReg(rn, false); pc = nextPc; return true; }              // FMOV Dd, Xn
+    if (((insn & 0xFFFFFC00) >>> 0) === 0x9E660000) { setReg(rd, v[rn] & M64, false); pc = nextPc; return true; }         // FMOV Xd, Dn
+    if ((insn & 0xFFFFFC00) === 0x1E270000) { v[rd] = getReg(rn, false) & 0xFFFFFFFFn; pc = nextPc; return true; } // FMOV Sd, Wn
+    if ((insn & 0xFFFFFC00) === 0x1E260000) { setReg(rd, v[rn] & 0xFFFFFFFFn, false); pc = nextPc; return true; } // FMOV Wd, Sn
+    if ((insn & 0xFFFFFC00) === 0x1E204000) { v[rd] = v[rn] & 0xFFFFFFFFn; pc = nextPc; return true; }             // FMOV Sd, Sn
+    if ((insn & 0xFFFFFC00) === 0x1E604000) { v[rd] = v[rn] & M64; pc = nextPc; return true; }                     // FMOV Dd, Dn
+    if (((insn & 0xBFE08400) >>> 0) === 0x2E000000) {                     // EXT (byte extract from concatenated pair)
+      const Q = (insn >>> 30) & 1, imm4 = (insn >> 11) & 0xF, size = Q ? 16 : 8;
+      const cat = [];
+      for (let i = 0; i < size; i++) cat.push(Number((v[rn] >> BigInt(8 * i)) & 0xFFn));
+      for (let i = 0; i < size; i++) cat.push(Number((v[rm] >> BigInt(8 * i)) & 0xFFn));
+      let r = 0n;
+      for (let i = size - 1; i >= 0; i--) r = (r << 8n) | BigInt(cat[imm4 + i]);
+      v[rd] = r & M128;
+      pc = nextPc; return true;
+    }
+    if (((insn & 0xBFE0FC00) >>> 0) === 0x0E000400) {                     // DUP (element): replicate one lane of Vn
+      const imm5 = (insn >> 16) & 31;
+      let tz = 0; while (((imm5 >> tz) & 1) === 0) tz++;
+      const esize = 8 << tz, idx = imm5 >> (tz + 1), em = (1n << BigInt(esize)) - 1n;
+      const Q = (insn >>> 30) & 1;
+      const val = (v[rn] >> BigInt(idx * esize)) & em;
+      let r = 0n; const lanes = (Q ? 128 : 64) / esize;
+      for (let i = 0; i < lanes; i++) r |= val << BigInt(i * esize);
+      v[rd] = r & M128;
+      pc = nextPc; return true;
+    }
+    {
+      const fam = insn & 0x9F00FC00;
+      if (fam === 0x0E000C00 || fam === 0x0E001C00 || fam === 0x0E003C00) {
+        // DUP / INS / UMOV+SMOV (copy between GPR and vector lanes)
+        const imm5 = (insn >> 16) & 31;
+        let tz = 0; while (((imm5 >> tz) & 1) === 0) tz++;
+        const esize = 8 << tz, idx = imm5 >> (tz + 1), em = (1n << BigInt(esize)) - 1n;
+        const Q = (insn >>> 30) & 1;
+        if (fam === 0x0E000C00) {                                         // DUP (general)
+          const val = getReg(rn, false) & em;
+          let r = 0n; const lanes = (Q ? 128 : 64) / esize;
+          for (let i = 0; i < lanes; i++) r |= val << BigInt(i * esize);
+          v[rd] = r & M128;
+        } else if (fam === 0x0E001C00) {                                  // INS (general)
+          const val = getReg(rn, false) & em;
+          v[rd] = (v[rd] & ~(em << BigInt(idx * esize))) | (val << BigInt(idx * esize));
+        } else {                                                          // UMOV / SMOV
+          let val = (v[rn] >> BigInt(idx * esize)) & em;
+          if (((insn >> 29) & 1) === 1 && (val & (1n << BigInt(esize - 1))) !== 0n) val |= ~em;  // SMOV sign-extend
+          setReg(rd, val, false);
+        }
+        pc = nextPc; return true;
+      }
+    }
+
+    // --- ADR / ADRP ---
+    if ((insn & 0x1F000000) === 0x10000000) {
+      let imm = BigInt(((insn >> 3) & 0x1FFFFC) | ((insn >> 29) & 3));
+      if (imm & 0x100000n) imm |= ~0x1FFFFFn;
+      if (sf) setReg(rd, ((pc & ~0xFFFn) + (imm << 12n)) & M64, false);
+      else setReg(rd, (pc + imm) & M64, false);
+      pc = nextPc; return true;
+    }
+
+    // --- data-processing immediate ---
+    const dpi = ((insn >>> 25) & 0xF);
+    if (dpi === 8 || dpi === 9) {
+      const op6 = (insn >>> 23) & 0x3F;
+      if (op6 === 0x22 || op6 === 0x23) {                                        // ADD/SUB imm
+        const isSub = (insn >>> 30) & 1, setF = (insn >>> 29) & 1;
+        let imm = BigInt((insn >> 10) & 0xFFF);
+        if ((insn >> 22) & 1) imm <<= 12n;
+        const a = getReg(rn, true) & wmask;
+        const r = isSub ? (a - imm) & M64 : (a + imm) & M64;
+        if (setF) { if (isSub) flagsSub(a, imm, r, bits); else flagsAdd(a, imm, r, bits); }
+        if (!(setF && rd === 31)) setReg(rd, r & wmask, !setF);
+        pc = nextPc; return true;
+      }
+      if (op6 === 0x24) {                                                        // logical imm
+        const opc = (insn >>> 29) & 3;
+        const imm = decodeBitmask((insn >> 22) & 1, (insn >> 16) & 0x3F, (insn >> 10) & 0x3F, bits);
+        if (imm === null) return undef(insn);
+        const a = getReg(rn, false) & wmask;
+        let r = opc === 1 ? (a | imm) : opc === 2 ? (a ^ imm) : (a & imm);
+        r &= wmask;
+        if (opc === 3) flagsLogic(r, bits);
+        if (!(opc === 3 && rd === 31)) setReg(rd, r, false);
+        pc = nextPc; return true;
+      }
+      if (op6 === 0x25) {                                                        // move wide
+        const opc = (insn >>> 29) & 3, hw = ((insn >> 21) & 3) * 16;
+        const imm16 = BigInt((insn >> 5) & 0xFFFF);
+        let r;
+        if (opc === 2) r = imm16 << BigInt(hw);
+        else if (opc === 0) r = (~(imm16 << BigInt(hw))) & M64;
+        else if (opc === 3) r = (getReg(rd, false) & ~(0xFFFFn << BigInt(hw))) | (imm16 << BigInt(hw));
+        else return undef(insn);
+        setReg(rd, r & wmask, false);
+        pc = nextPc; return true;
+      }
+      if (op6 === 0x26) {                                                        // bitfield
+        const opc = (insn >>> 29) & 3;
+        if (((insn >> 22) & 1) !== sf) return undef(insn);
+        const immr = (insn >> 16) & 0x3F, imms = (insn >> 10) & 0x3F;
+        const src = getReg(rn, false) & wmask;
+        let r;
+        if (imms >= immr) {
+          const width = imms - immr + 1, m = (1n << BigInt(width)) - 1n;
+          const field = (src >> BigInt(immr)) & m;
+          if (opc === 1) r = ((getReg(rd, false) & wmask) & ~m) | field;         // BFM
+          else if (opc === 0) r = sext(field, width) & wmask;                    // SBFM
+          else r = field;                                                        // UBFM
+        } else {
+          const m = ((1n << BigInt(imms + 1)) - 1n) << BigInt(bits - immr);
+          const field = (src << BigInt(bits - immr)) & m;
+          if (opc === 1) r = ((getReg(rd, false) & wmask) & ~m) | field;
+          else if (opc === 0) {                                                  // SBFIZ: sign-extended insert
+            // (ASR-immediate has imms = datasize-1, so it always lands in
+            // the extract branch above; this branch is the insert form.
+            // Stage-5 frontier 10: the old "ASR form" here returned ~0 for
+            // the kernel's sbfiz x22, x12, #14, #32 and zeroed a zone
+            // chunk base, faulting the boot at VA 0x118.)
+            const fv = src & ((1n << BigInt(imms + 1)) - 1n);
+            r = (sext(fv, imms + 1) << BigInt(bits - immr)) & wmask;
+          }
+          else r = field;                                                        // LSL form
+        }
+        setReg(rd, r & wmask, false);
+        pc = nextPc; return true;
+      }
+      if (op6 === 0x27) {                                                        // EXTR
+        const concat = (getReg(rn, false) & wmask) << BigInt(bits) | (getReg(rm, false) & wmask);
+        setReg(rd, (concat >> BigInt((insn >> 10) & 0x3F)) & wmask, false);
+        pc = nextPc; return true;
+      }
+    }
+
+    // --- branches ---
+    if ((insn & 0x7C000000) === 0x14000000) {                                    // B / BL
+      let imm = BigInt(insn & 0x3FFFFFF);
+      if (imm & 0x2000000n) imm |= ~0x3FFFFFFn;
+      if ((insn >>> 31) & 1) setReg(30, nextPc, false);
+      pc = (pc + (imm << 2n)) & M64; return true;
+    }
+    if ((insn & 0xFF000010) === 0x54000000) {                                    // B.cond
+      let imm = BigInt((insn >> 5) & 0x7FFFF);
+      if (imm & 0x40000n) imm |= ~0x7FFFFn;
+      pc = condHolds(insn & 0xF) ? (pc + (imm << 2n)) & M64 : nextPc; return true;
+    }
+    if ((insn & 0x7E000000) === 0x34000000) {                                    // CBZ / CBNZ
+      let imm = BigInt((insn >> 5) & 0x7FFFF);
+      if (imm & 0x40000n) imm |= ~0x7FFFFn;
+      const isz = (getReg(rd, false) & wmask) === 0n;
+      pc = (((insn >>> 24) & 1) ? !isz : isz) ? (pc + (imm << 2n)) & M64 : nextPc; return true;
+    }
+    if ((insn & 0x7E000000) === 0x36000000) {                                    // TBZ / TBNZ
+      const bpos = (((insn >>> 31) & 1) << 5) | ((insn >> 19) & 0x1F);
+      let imm = BigInt((insn >> 5) & 0x3FFF);
+      if (imm & 0x2000n) imm |= ~0x3FFFn;
+      const bit = (getReg(rd, false) >> BigInt(bpos)) & 1n;
+      pc = (((insn >>> 24) & 1) ? bit === 1n : bit === 0n) ? (pc + (imm << 2n)) & M64 : nextPc; return true;
+    }
+    if (((insn & 0xFFFFFC1F) >>> 0) === 0xD61F0000) { pc = getReg(rn, false); return true; }              // BR
+    if (((insn & 0xFFFFFC1F) >>> 0) === 0xD63F0000) { setReg(30, nextPc, false); pc = getReg(rn, false); return true; } // BLR
+    if ((insn >>> 0) === 0xD65F0BFF || (insn >>> 0) === 0xD65F0FFF) { pc = getReg(30, false); return true; } // RETAA / RETAB (auth not modelled)
+    {
+      // Pointer-authenticated branches (FEAT_PAuth): BRAA/BRAB, BLRAA/BLRAB
+      // (target in Rn, modifier in Rd), BRAAZ/BRABZ, BLRAAZ/BLRABZ (Rd = 11111).
+      // Authentication is not modelled, consistent with RETAA/RETAB: branch to
+      // the raw pointer. Frontier case: BLRAA x27, x26 = 0xD73F0B7A.
+      const top = (insn & 0xFFFF0000) >>> 0;
+      if ((top === 0xD71F0000 || top === 0xD73F0000) && ((insn >> 11) & 1) === 1) {
+        if (top === 0xD73F0000) setReg(30, nextPc, false);
+        pc = getReg(rn, false); return true;
+      }
+      if ((top === 0xD61F0000 || top === 0xD63F0000) && ((insn >> 10) & 3) === 2 && (insn & 31) === 31) {
+        if (top === 0xD63F0000) setReg(30, nextPc, false);
+        pc = getReg(rn, false); return true;
+      }
+    }
+    if (((insn & 0xFFFFFC1F) >>> 0) === 0xD65F0000) { pc = getReg(rn, false); return true; }              // RET
+
+    // --- loads & stores: pairs ---
+    if ((insn & 0x7A000000) === 0x28000000) {
+      const opc = (insn >>> 30) & 3;
+      if (opc === 1 || opc === 3) return undef(insn);                            // SIMD pairs: later
+      const size = opc === 2 ? 8 : 4;
+      const L = (insn >> 22) & 1, mode = (insn >>> 23) & 7;
+      const rt2 = (insn >> 10) & 31;
+      let imm = BigInt(insn >> 15 & 0x7F);
+      if (imm & 0x40n) imm |= ~0x7Fn;
+      imm *= BigInt(size);
+      const base = getReg(rn, true);
+      let addr = base;
+      if (mode === 2 || mode === 0) addr = base + imm;                           // signed offset (010) / LDNP+STNP (000, non-temporal hint ignored)
+      else if (mode === 3 || mode === 1) addr = base + imm;                      // pre (011) / post handled below
+      else if (mode === 6 || mode === 7) addr = base + imm;
+      else return undef(insn);
+      const isPre = mode === 3 || mode === 7, isPost = mode === 1 || mode === 5;
+      const a0 = isPost ? base : addr;
+      if (L) {
+        setReg(rd, readMem(a0, size), false);
+        setReg(rt2, readMem(a0 + BigInt(size), size), false);
+      } else {
+        writeMem(a0, getReg(rd, false), size);
+        writeMem(a0 + BigInt(size), getReg(rt2, false), size);
+      }
+      if (isPre || isPost) setReg(rn, addr, true);
+      pc = nextPc; return true;
+    }
+
+    // --- loads & stores: single ---
+    if (((insn & 0xFFE0FC00) >>> 0) === 0x9AC03000) {                            // PACGA (stage-5 frontier 16)
+      // Pointer Authentication generic code: architecturally QARMA over
+      // (Rn = data, Rm = modifier) keyed by APGAKey_EL1. The exact QARMA
+      // variant is IMP-DEF; every kernel use on the boot path is
+      // compute-and-compare (chained struct hashes), so what the machine
+      // must provide is a deterministic, key-dependent function — this is
+      // a 6-round ARX mix over data/modifier/both key halves. The key is
+      // whatever the kernel itself programmed via MSR (0 if never set).
+      const klo = sysregs.get("3,0,2,3,1") || 0n, khi = sysregs.get("3,0,2,3,2") || 0n;
+      let x = (getReg(rn, false) ^ klo) & M64;
+      const mod = getReg(rm, false);
+      const rot = (v, s) => ((v << BigInt(s)) | (v >> BigInt(64 - s))) & M64;
+      for (let i = 0; i < 6; i++) {
+        x = (x + (mod ^ khi ^ BigInt(i * 0x9E3779B97F4A7C15))) & M64;
+        x = rot(x, 23);
+        x = (x * 0xBF58476D1CE4E5B9n) & M64;
+        x ^= x >> 29n;
+        x = rot(x, 41);
+        x = (x * 0x94D049BB133111EBn) & M64;
+        x ^= x >> 32n;
+      }
+      setReg(rd, x & M64, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3F000000) === 0x19000000 && ((insn >> 21) & 1) === 0) {
+      // STLUR / LDAPUR + sign-extending LDAPURSB/SH/SW (stage-5 frontier 9):
+      // unscaled ordered load/store, imm9 offset, no writeback; ordering
+      // semantics are no-ops in this single-CPU model. Layout calibrated
+      // vs capstone: bit 23 = sign-extending load family, bit 22 = load
+      // (or W-destination in the sign family).
+      const size = (insn >>> 30) & 3, bytes = 1 << size;
+      let imm = BigInt((insn >> 12) & 0x1FF);
+      if (imm & 0x100n) imm |= ~0x1FFn;
+      const addr = (getReg(rn, true) + imm) & M64;
+      const b23 = (insn >> 23) & 1, b22 = (insn >> 22) & 1;
+      if (!b23 && !b22) writeMem(addr, getReg(rd, false), bytes);              // STLUR
+      else if (!b23) setReg(rd, readMem(addr, bytes), false);                  // LDAPUR (zero-extended)
+      else {                                                                   // LDAPURSB/SH/SW
+        if (size === 3) return undef(insn);
+        let val = sext(readMem(addr, bytes), bytes * 8);
+        if (b22) val &= 0xFFFFFFFFn;
+        setReg(rd, val, false);
+      }
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3F000000) === 0x18000000) {                                    // LDR literal (V=0 only; SIMD form lives in the AdvSIMD block)
+      const opc = (insn >>> 30) & 3;
+      if (opc === 3) { pc = nextPc; return true; }                              // PRFM literal: prefetch hint, no-op
+      let imm = BigInt((insn >> 5) & 0x7FFFF);
+      if (imm & 0x40000n) imm |= ~0x7FFFFn;
+      const addr = (pc + (imm << 2n)) & M64;
+      if (opc === 0) setReg(rd, readMem(addr, 4), false);
+      else if (opc === 1) setReg(rd, readMem(addr, 8), false);
+      else setReg(rd, sext(readMem(addr, 4), 32), false);                        // LDRSW
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3F200C00) === 0x38200000) {                                    // LSE atomics: LDADD/LDCLR/LDEOR/LDSET/LDSMAX/LDSMIN/LDUMAX/LDUMIN/SWP
+      // bits 29:24 = 111010 with bit 21 = 1 AND bits 11:10 = 00
+      // (stage-5 frontiers 6+7). These words also match the load/store
+      // mask below, which used to claim them and execute e.g. LDADD as a
+      // random unscaled load/store. The bits 11:10 = 00 term is
+      // load-bearing: without it this block also claims LDR/STR
+      // register-offset words (bits 11:10 = 10) — it executed the
+      // chained-fixup veneer's `ldrsw x16, [x17, x16, lsl #2]` as an
+      // LDUMIN that zeroed the jump-table entry it was reading.
+      // A/L ordering variants are no-ops in this single-CPU model.
+      // Opcode map (bit 15 = o3, bits 14:12 = opc) calibrated vs capstone.
+      const size = (insn >>> 30) & 3, bytes = 1 << size, addr = getReg(rn, true);
+      const rs = (insn >> 16) & 31, o3 = (insn >> 15) & 1, opc = (insn >> 12) & 7;
+      const m = (1n << BigInt(bytes * 8)) - 1n;
+      const old = readMem(addr, bytes) & m, opnd = getReg(rs, false) & m;
+      const sgn = (x) => (x & (1n << BigInt(bytes * 8 - 1))) !== 0n ? x - (1n << BigInt(bytes * 8)) : x;
+      let nv;
+      if (o3 === 1 && opc === 4 && rs === 31) {                                  // LDAPR (stage-5 frontier 11)
+        // Load-Acquire RCpc (register form) shares this space: bits
+        // 15:12 = 1100 with Rs = 11111 (capstone: any other Rs here is
+        // unallocated). Plain load in this single-CPU model.
+        setReg(rd, old, false);
+        pc = nextPc; return true;
+      }
+      if (o3) { if (opc !== 0) return undef(insn); nv = opnd; }                  // SWP
+      else if (opc === 0) nv = (old + opnd) & m;                                 // LDADD
+      else if (opc === 1) nv = old & ~opnd & m;                                  // LDCLR
+      else if (opc === 2) nv = old ^ opnd;                                       // LDEOR
+      else if (opc === 3) nv = old | opnd;                                       // LDSET
+      else if (opc === 4) nv = sgn(old) >= sgn(opnd) ? old : opnd;               // LDSMAX
+      else if (opc === 5) nv = sgn(old) <= sgn(opnd) ? old : opnd;               // LDSMIN
+      else if (opc === 6) nv = old >= opnd ? old : opnd;                         // LDUMAX
+      else nv = old <= opnd ? old : opnd;                                        // LDUMIN
+      writeMem(addr, nv, bytes);
+      setReg(rd, old, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3B000000) === 0x39000000 || (insn & 0x3B000000) === 0x38000000) {
+      const size = (insn >>> 30) & 3, opc = (insn >>> 22) & 3;
+      const bytes = 1 << size;
+      if (size === 3 && opc === 3 && ((insn & 0x3B000000) === 0x39000000)) { pc = nextPc; return true; } // PRFM
+      const base = getReg(rn, true);
+      let addr, writeback = null;
+      if ((insn & 0x3B000000) === 0x39000000) {                                   // unsigned offset
+        addr = base + BigInt(((insn >> 10) & 0xFFF) * bytes);
+      } else if (((insn >> 21) & 1) && ((insn >> 10) & 3) === 2) {               // register offset
+        const opt = (insn >> 13) & 7, sh = ((insn >> 12) & 1) ? size : 0;
+        let ext = getReg(rm, false);
+        if (opt === 2) ext &= 0xFFFFFFFFn;
+        else if (opt === 6) ext = sext(ext & 0xFFFFFFFFn, 32);
+        else if (opt !== 3 && opt !== 7) return undef(insn);
+        addr = (base + ((ext << BigInt(sh)) & M64)) & M64;
+      } else {
+        let imm = BigInt((insn >> 12) & 0x1FF);
+        if (imm & 0x100n) imm |= ~0x1FFn;
+        const mode = (insn >> 10) & 3;
+        if (mode === 0) addr = base + imm;                                       // unscaled
+        else if (mode === 3) { addr = base + imm; writeback = addr; }            // pre-index
+        else if (mode === 1) { addr = base; writeback = base + imm; }            // post-index
+        else return undef(insn);
+      }
+      if (opc === 0) {
+        writeMem(addr, getReg(rd, false), bytes);
+      } else {
+        const raw = readMem(addr, bytes);
+        let val;
+        if (opc === 1) val = raw;
+        else if (opc === 2) val = sext(raw, bytes * 8) & (sf ? M64 : 0xFFFFFFFFn);
+        else val = sext(raw, bytes * 8);
+        setReg(rd, (sf || opc === 3) ? val : val & 0xFFFFFFFFn, false);
+      }
+      if (writeback !== null) setReg(rn, writeback, true);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3F000000) === 0x08000000) {                                    // exclusives + CAS (stage-5 frontier 6)
+      // This space was originally a "simple model" that treated every word
+      // as a plain load or store — including CAS, which it executed as a
+      // load that never stored. A CAS-based lock acquire then "succeeded"
+      // without ever writing the lock word, and the matching
+      // lck_rw_unlock_exclusive panicked: lock held in wrong mode.
+      // Single-CPU model: exclusives always succeed, CAS is exact.
+      // Field layout calibrated against capstone decodes.
+      const size = (insn >>> 30) & 3, bytes = 1 << size, addr = getReg(rn, true);
+      const rs = (insn >> 16) & 31, rt2 = (insn >> 10) & 31;
+      const m = (1n << BigInt(bytes * 8)) - 1n;
+      const kind = (insn >> 21) & 3, bit23 = (insn >> 23) & 1, o3 = (insn >> 15) & 1;
+      // This space also holds LDAR/STLR, which the old simple model
+      // handled by luck via bit 21; a CAS-first decode misroutes them.
+      // True layout (capstone-calibrated): with bit 23 set, kind 1 = CAS,
+      // kind 3 = CASA (bit 15 = release for both), kind 0 + bit 15 +
+      // Rs/Rt2 = 11111 = STLR, kind 2 + bit 15 + Rs/Rt2 = 11111 = LDAR.
+      if (bit23 === 1 && (kind === 1 || kind === 3)) {                           // CAS / CASL / CASA / CASAL
+        if (rt2 !== 31) return undef(insn);
+        // ARM semantics: compare [Rn] against Rs; on match store Rt;
+        // the OLD value is written back to **Rs**, not Rt (stage-5
+        // frontier 15: writing it to Rt made every `casal Rs, Rt, [Rn];
+        // cmp Rs, #0` retry loop spin forever, since Rs never changed).
+        const expected = getReg(rs, false) & m;
+        const old = readMem(addr, bytes) & m;
+        if (old === expected) writeMem(addr, getReg(rd, false) & m, bytes);
+        setReg(rs, old, false);
+        pc = nextPc; return true;
+      }
+      if (bit23 === 1 && kind === 0 && o3 === 1 && rs === 31 && rt2 === 31) { writeMem(addr, getReg(rd, false), bytes); pc = nextPc; return true; }  // STLR
+      if (bit23 === 1 && kind === 2 && o3 === 1 && rs === 31 && rt2 === 31) { setReg(rd, readMem(addr, bytes), false); pc = nextPc; return true; }  // LDAR
+      if (bit23 === 1) return undef(insn);
+      // exclusives: kind 0 STXR, 1 STXP, 2 LDXR, 3 LDXP (bit 15 = acquire/release variant)
+      if (kind === 0) { writeMem(addr, getReg(rd, false), bytes); if (rs !== 31) setReg(rs, 0n, false); }
+      else if (kind === 1) { writeMem(addr, getReg(rd, false), bytes); writeMem(addr + BigInt(bytes), getReg(rt2, false), bytes); if (rs !== 31) setReg(rs, 0n, false); }
+      else if (kind === 2) setReg(rd, readMem(addr, bytes), false);
+      else { setReg(rd, readMem(addr, bytes), false); setReg(rt2, readMem(addr + BigInt(bytes), bytes), false); }
+      pc = nextPc; return true;
+    }
+
+    // --- data-processing register ---
+    if ((insn & 0x1FE00000) === 0x0B200000) {                                    // ADD/SUB extended reg
+      const isSub = (insn >>> 30) & 1, setF = (insn >>> 29) & 1;
+      const opt = (insn >> 13) & 7, sh = (insn >> 10) & 7;
+      let ext = getReg(rm, false);
+      const from = [8, 16, 32, 64][opt & 3];
+      ext &= (1n << BigInt(from)) - 1n;
+      if (opt >= 4) ext = sext(ext, from);
+      ext = (ext << BigInt(sh)) & M64;
+      const a = getReg(rn, true) & wmask;
+      const r = isSub ? (a - ext) & M64 : (a + ext) & M64;
+      if (setF) { if (isSub) flagsSub(a, ext, r, bits); else flagsAdd(a, ext, r, bits); }
+      if (!(setF && rd === 31)) setReg(rd, r & wmask, !setF);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x1F200000) === 0x0B000000) {                                    // ADD/SUB shifted reg
+      const isSub = (insn >>> 30) & 1, setF = (insn >>> 29) & 1;
+      const sht = (insn >> 22) & 3, amt = (insn >> 10) & 0x3F;
+      if (sht === 3) return undef(insn);
+      const b = shiftReg(getReg(rm, false), sht, amt, bits);
+      const a = getReg(rn, false) & wmask;   // shifted-reg form: Rn/Rd 31 = XZR, never SP
+      const r = isSub ? (a - b) & M64 : (a + b) & M64;   // (SP is only reachable in the imm/extended forms;
+      if (setF) { if (isSub) flagsSub(a, b, r, bits); else flagsAdd(a, b, r, bits); }   // NEG = SUB Rd, XZR, Rm depends on this)
+      if (!(setF && rd === 31)) setReg(rd, r & wmask, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x1F000000) === 0x0A000000) {                                    // logical shifted reg
+      const opc = (insn >>> 29) & 3, sht = (insn >> 22) & 3, Nin = (insn >> 21) & 1;
+      let b = shiftReg(getReg(rm, false), sht, (insn >> 10) & 0x3F, bits);
+      if (Nin) b = (~b) & wmask;
+      const a = getReg(rn, false) & wmask;
+      let r = opc === 1 ? (a | b) : opc === 2 ? (a ^ b) : (a & b);
+      r &= wmask;
+      if (opc === 3) flagsLogic(r, bits);
+      if (!(opc === 3 && rd === 31)) setReg(rd, r, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x1FE00000) === 0x1A000000) {                                    // ADC / SBC
+      const isSub = (insn >>> 30) & 1, setF = (insn >>> 29) & 1;
+      const a = getReg(rn, false) & wmask;
+      let b = getReg(rm, false) & wmask;
+      if (isSub) b = (~b) & wmask;
+      const r = (a + b + BigInt(C)) & M64;
+      if (setF) flagsAdd(a, b + BigInt(C) > wmask ? wmask : b, r, bits);         // close enough: carry via add of a+b+C below
+      if (setF) {                                                                // exact carry/overflow for ADC/SBC
+        const mask = wmask, sign = bits === 64 ? 0x8000000000000000n : 0x80000000n;
+        const full = (a & mask) + (b & mask) + BigInt(C);
+        N = (r & sign) ? 1 : 0; Z = ((r & mask) === 0n) ? 1 : 0;
+        C = (full >> BigInt(bits)) & 1n ? 1 : 0;
+        V = ((~(a ^ b) & (a ^ r)) & sign) ? 1 : 0;
+      }
+      setReg(rd, r & wmask, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x3FE00000) === 0x3A400000) {                                    // CCMP / CCMN (register + immediate)
+      const isSub = (insn >>> 30) & 1;                                           // 1 = CCMP, 0 = CCMN
+      const cond = (insn >> 12) & 0xF, nzcv = insn & 0xF;
+      const a = getReg(rn, false) & wmask;
+      const b = ((insn >> 11) & 1) === 1 ? BigInt((insn >> 16) & 0x1F) : (getReg(rm, false) & wmask);
+      if (condHolds(cond)) {
+        if (isSub) { const r = (a - b) & M64; flagsSub(a, b, r, bits); }
+        else { const r = (a + b) & M64; flagsAdd(a, b, r, bits); }
+      } else { N = (nzcv >> 3) & 1; Z = (nzcv >> 2) & 1; C = (nzcv >> 1) & 1; V = nzcv & 1; }
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x1FE00000) === 0x1A800000) {                                    // CSEL family
+      const op = (insn >>> 30) & 1, op2 = (insn >> 10) & 3;
+      const cond = (insn >> 12) & 0xF;
+      const a = getReg(rn, false) & wmask, b = getReg(rm, false) & wmask;
+      let alt;
+      if (op === 0 && op2 === 0) alt = b;                                        // CSEL
+      else if (op === 0 && op2 === 1) alt = (b + 1n) & M64;                      // CSINC
+      else if (op === 1 && op2 === 0) alt = (~b) & M64;                          // CSINV
+      else if (op === 1 && op2 === 1) alt = (-b) & M64;                          // CSNEG
+      else return undef(insn);
+      setReg(rd, (condHolds(cond) ? a : alt) & wmask, false);
+      pc = nextPc; return true;
+    }
+    if (((insn & 0xFFFF0000) >>> 0) === 0xDAC10000) {
+      // PACIA/PACIB/PACDA/PACDB/AUTIA/AUTIB/AUTDA/AUTDB + XPAC: pointer
+      // authentication is not modelled; signing/authenticating is a no-op.
+      // Must sit before DP 2-source, whose mask also matches 0xDAC1xxxx.
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x5FE00000) === 0x5AC00000) {                                    // DP 1-source — must precede DP 2-source:
+      const opc = (insn >> 10) & 0x3F;                                          // DP2's mask lacks the S bit and steals these
+      const a = getReg(rn, false) & wmask;
+      let r;
+      if (opc === 0) {                                                           // RBIT
+        r = 0n;
+        for (let i = 0; i < bits; i++) if ((a >> BigInt(i)) & 1n) r |= 1n << BigInt(bits - 1 - i);
+      } else if (opc === 1) {                                                    // REV16
+        r = 0n;
+        for (let i = 0; i < bits; i += 16) r |= ((a >> BigInt(i)) & 0xFFn) << BigInt(i + 8) | ((a >> BigInt(i + 8)) & 0xFFn) << BigInt(i);
+      } else if (opc === 2 || opc === 3) {                                       // REV (32-bit / 64-bit forms)
+        r = 0n;
+        const nb = bits / 8;
+        for (let i = 0; i < nb; i++) r |= ((a >> BigInt(8 * i)) & 0xFFn) << BigInt(8 * (nb - 1 - i));
+      } else if (opc === 4) {                                                    // CLZ
+        r = BigInt(bits);
+        for (let i = bits - 1; i >= 0; i--) if ((a >> BigInt(i)) & 1n) { r = BigInt(bits - 1 - i); break; }
+      } else if (opc === 5) {                                                    // CLS
+        const sign = (a >> BigInt(bits - 1)) & 1n;
+        r = BigInt(bits - 1);
+        for (let i = bits - 2; i >= 0; i--) {
+          if (((a >> BigInt(i)) & 1n) !== sign) { r = BigInt(bits - 2 - i); break; }
+          if (i === 0) r = BigInt(bits - 1);
+        }
+      } else return undef(insn);
+      setReg(rd, r & wmask, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x1FE00000) === 0x1AC00000) {                                    // DP 2-source
+      const opc = (insn >> 10) & 0x3F;
+      const a = getReg(rn, false) & wmask, b = getReg(rm, false) & wmask;
+      let r;
+      if (opc === 2) r = b === 0n ? 0n : a / b;                                  // UDIV
+      else if (opc === 3) {                                                      // SDIV
+        if (b === 0n) r = 0n;
+        else {
+          const sa = sext(a, bits), sb = sext(b, bits);
+          const q = sa / sb;                                                     // BigInt division truncates toward zero
+          r = q & wmask;
+        }
+      }
+      else if (opc === 8) r = shiftReg(a, 0, Number(b & BigInt(bits - 1)), bits);   // LSLV
+      else if (opc === 9) r = shiftReg(a, 1, Number(b & BigInt(bits - 1)), bits);   // LSRV
+      else if (opc === 10) r = shiftReg(a, 2, Number(b & BigInt(bits - 1)), bits);  // ASRV
+      else if (opc === 11) r = shiftReg(a, 3, Number(b & BigInt(bits - 1)), bits);  // RORV
+      else return undef(insn);
+      setReg(rd, r & wmask, false);
+      pc = nextPc; return true;
+    }
+    if ((insn & 0x1FE00000) === 0x1B000000) {                                    // MADD / MSUB
+      const ra = (insn >> 10) & 31, o0 = (insn >> 15) & 1;
+      const prod = (getReg(rn, false) & wmask) * (getReg(rm, false) & wmask);
+      const acc = getReg(ra, false) & wmask;
+      setReg(rd, (o0 ? acc - prod : acc + prod) & wmask, false);
+      pc = nextPc; return true;
+    }
+    if (((insn >>> 31) & 1) === 1 &&
+        ((insn & 0x1FE00000) === 0x1B200000 || (insn & 0x1FE00000) === 0x1B400000 ||
+         (insn & 0x1FE00000) === 0x1BA00000 || (insn & 0x1FE00000) === 0x1BC00000)) {
+      // Multiply long / high: SMADDL/SMSUBL (op31 1), SMULH (2), UMADDL/UMSUBL (5), UMULH (6)
+      const op31 = (insn >>> 21) & 7, o0 = (insn >> 15) & 1, ra = (insn >> 10) & 31;
+      let r;
+      if (op31 === 2 || op31 === 6) {                                           // SMULH / UMULH
+        if (ra !== 31) return undef(insn);
+        const a = getReg(rn, false), b = getReg(rm, false);
+        if (op31 === 2) {
+          const sa = (a & (1n << 63n)) ? a - (1n << 64n) : a;
+          const sb = (b & (1n << 63n)) ? b - (1n << 64n) : b;
+          r = (sa * sb) >> 64n;
+        } else r = (a * b) >> 64n;
+      } else {                                                                  // SMADDL / UMADDL family (32-bit sources)
+        const a32 = getReg(rn, false) & 0xFFFFFFFFn, b32 = getReg(rm, false) & 0xFFFFFFFFn;
+        let prod;
+        if (op31 === 1) {
+          const sa = (a32 & 0x80000000n) ? a32 - (1n << 32n) : a32;
+          const sb = (b32 & 0x80000000n) ? b32 - (1n << 32n) : b32;
+          prod = sa * sb;
+        } else prod = a32 * b32;
+        r = o0 ? getReg(ra, false) - prod : getReg(ra, false) + prod;
+      }
+      setReg(rd, r & M64, false);
+      pc = nextPc; return true;
+    }
+
+    return undef(insn);
+  }
+
+  return {
+    loadBytes, readMem, writeMem,
+    get pc() { return pc; }, set pc(v) { pc = v & M64; },
+    get sp() { return sp; }, set sp(v) { sp = v & M64; },
+    get vregs() { return v; },
+    get status() { return status; },
+    get trapInfo() { return trapInfo; },
+    get icount() { return icount; },
+    get mmioLog() { return mmioLog; },
+    get mmuOn() { return mmuOn; },
+    get exceptions() { return excCount; },
+    get lastException() { return lastExc; },
+    regs: x,
+    sysregs, readPhys, writePhys,
+    step,
+    run(max) {
+      let n = 0;
+      if (status === "breakpoint") { status = "ready"; if (!step()) return status; n++; }
+      while (n < max) {
+        if (status === "halted" || status === "trap" || status === "undefined" || status === "wfi") break;
+        if (breakpoints.size !== 0 && breakpoints.has(pc.toString(16))) {
+          status = "breakpoint";
+          trapInfo = "breakpoint at PC 0x" + pc.toString(16);
+          break;
+        }
+        if (!step()) break;
+        n++;
+      }
+      return status;
+    },
+    // ---- backdoor: open access to the fake phone ----
+    getReg, setReg,
+    breakpoints,
+    addBreakpoint(addr) { breakpoints.add((addr & M64).toString(16)); },
+    clearBreakpoints() { breakpoints.clear(); },
+    peekBytes(addr, len) {
+      const out = new Uint8Array(len);
+      for (let i = 0; i < len; i++) out[i] = Number(readMem(addr + BigInt(i), 1));
+      return out;
+    },
+    peekQuiet(addr, len) {               // backdoor reads that never disturb the CPU state
+      const s = status, t = trapInfo;
+      const out = new Uint8Array(len);
+      for (let i = 0; i < len; i++) out[i] = Number(readMem(addr + BigInt(i), 1));
+      status = s; trapInfo = t;
+      return out;
+    },
+    pokeQuiet(addr, bytes) {
+      const s = status, t = trapInfo;
+      for (let i = 0; i < bytes.length; i++) writeMem(addr + BigInt(i), BigInt(bytes[i]), 1);
+      status = s; trapInfo = t;
+    },
+    lastPcs(n) {
+      const out = [];
+      for (let i = 0; i < Math.min(n, 64); i++) out.push(pcRing[(pcRingIdx - 1 - i + 128) & 63]);
+      return out.reverse();
+    },
+    resume() { if (status === "breakpoint" || status === "wfi") status = "ready"; },
+    queueUartRx(text) { for (const ch of String(text)) uartRxQueue.push(ch.charCodeAt(0) & 0xFF); },
+    reset() {
+      pages.clear(); sysregs.clear(); mmioLog.clear(); fetchPaBase = -1n; fetchPage = null;
+      x.fill(0n); v.fill(0n); sp = 0n; pc = 0n; N = Z = C = V = 0;
+      icount = 0; status = "ready"; trapInfo = ""; mmuOn = false;
+    }
+  };
+}
+
+if (typeof module !== "undefined") module.exports = { createMachine, DRAM_BASE, UART_BASE };
+
+"use strict";
+/*
+ * Stage-2 boot loader for FakeDevice: parses the kernelcache Mach-O,
+ * loads its segments at their real physical addresses, builds the
+ * boot_args structure XNU expects in X0 (layout from Apple's
+ * pexpert/pexpert/arm64/boot.h, revision 2), attaches a minimal
+ * Apple Device Tree (ADT), and starts the CPU at the true entry point
+ * taken from LC_UNIXTHREAD.
+ *
+ * Address plan (t8030 / iPhone 11):
+ *   DRAM base        0x800000000
+ *   kernel phys base 0x800004000   (virt base 0xFFFFFFF007004000)
+ *   boot_args        right after the kernel image
+ *   ADT              one page after boot_args
+ *
+ * TRANSLATOR PACK: every machine-specific constant above lives in a data
+ * pack, not in code (the design, 2026-11-26: the apps import the
+ * kernelcache and a translator pack as two separate files). The canonical
+ * pack for this machine is translator-pack-iphone11.json (see PACK.md);
+ * BUILTIN_PACK below is a byte-identical copy for contexts that cannot
+ * read files (the single-file web page), and packcheck.mjs proves the two
+ * never drift. Every function takes an optional pack argument; the native
+ * cores load the JSON directly and never see these defaults.
+ */
+const BUILTIN_PACK = {"packVersion":1,"machine":"iPhone12,1","machineName":"iPhone 11","soc":"t8030","socName":"Apple A13 Bionic","description":"FakeDevice translator pack: the complete machine definition for the iPhone 11 (t8030) as DATA. The emulator core (web JS today, native Swift in the apps) contains no machine constants; everything t8030-specific lives here. 64-bit addresses and sizes are hex strings; small enumerations are plain numbers. See PACK.md for the meaning of every field.","memory":{"dramBase":"0x800000000","memSize":"0x100000000","kernelPhysBase":"0x801004000","kernelVirtBase":"0xFFFFFFF007004000","pageSize":"0x4000"},"bootLayout":{"bootArgsOffsetFromKernelTop":"0x0","adtOffsetFromBootArgs":"0x4000"},"uart":{"name":"uart0","base":"0x235200000","size":"0x1000","compatible":"samsung,uart","interrupts":[0,81,0],"registers":{"utrstat":"0x10","utxh":"0x20","urxh":"0x24"}},"armIo":{"name":"arm-io","compatible":"arm-io,t8030","deviceType":"arm-io","addressCells":2,"sizeCells":2,"regAddress":"0x200000000","regSize":"0x100000000","ranges":[{"childAddress":"0x0","parentAddress":"0x200000000","size":"0x100000000"}]},"cpus":{"name":"cpus","addressCells":1,"sizeCells":0,"deviceType":"cpu","list":[{"name":"cpu@0","reg":0,"compatible":"apple,thunder","clusterType":69,"clusterName":"E","state":"running"},{"name":"cpu@1","reg":1,"compatible":"apple,thunder","clusterType":69,"clusterName":"E","state":"idle"},{"name":"cpu@2","reg":2,"compatible":"apple,thunder","clusterType":69,"clusterName":"E","state":"idle"},{"name":"cpu@3","reg":3,"compatible":"apple,thunder","clusterType":69,"clusterName":"E","state":"idle"},{"name":"cpu@4","reg":256,"compatible":"apple,lightning","clusterType":80,"clusterName":"P","state":"idle"},{"name":"cpu@5","reg":257,"compatible":"apple,lightning","clusterType":80,"clusterName":"P","state":"idle"}]},"deviceTree":{"rootName":"/","rootCompatible":"apple,t8030","model":"iPhone12,1","rootAddressCells":2,"rootSizeCells":2,"memoryNodeName":"memory","chosenNodeName":"chosen","randomSeedHex":"0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489aed3f81d42678cb1d6fb20456a8fb4d9fe23486d92b7dc0126"},"bootArgs":{"revision":2,"version":2,"structSize":1152,"machineType":0,"commandLine":"-v","bootFlags":"0x0","layout":{"revision":0,"version":2,"virtBase":8,"physBase":16,"memSize":24,"topOfKernelData":32,"video":40,"machineType":88,"deviceTreeP":96,"deviceTreeLength":104,"commandLine":112,"bootFlags":1136,"memSizeActual":1144}},"lockRegs":{"name":"lock-regs","amcc":{"name":"amcc","apertureCount":1,"apertureSize":"0x4000","planeCount":1,"planeStride":0,"aperturePhysAddr":["0x200000000"],"cacheStatus":0,"regs":[{"name":"cache-status","offset":0,"mask":0,"value":0}]},"ctrrA":{"name":"amcc-ctrr-a","pageSizeShift":14,"lowerLimit":"0x800000000","upperLimit":"0x900000000","lock":0,"enable":0,"writeDisable":0,"regs":[{"name":"lower-limit","offset":0,"mask":0},{"name":"upper-limit","offset":0,"mask":0},{"name":"lock","offset":0,"mask":0,"value":0},{"name":"enable","offset":0,"mask":0,"value":0},{"name":"write-disable","offset":0,"mask":0,"value":0}]}}};
+const KC_VIRT_BASE = BigInt(BUILTIN_PACK.memory.kernelVirtBase);
+const KC_PHYS_BASE = BigInt(BUILTIN_PACK.memory.kernelPhysBase);   // this kernelcache's expected load base: its early
+                                     // page tables map VA->PA for exactly this placement
+                                     // (proven 2026-11-26: the L2 descriptor output is the
+                                     // same constant no matter where the image is loaded;
+                                     // at 0x800004000 the post-MMU jump lands 16 MB off)
+const MEM_SIZE = BigInt(BUILTIN_PACK.memory.memSize);              // 4 GiB, like the iPhone 11
+
+function parseMachO(bytes) {
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const magic = dv.getUint32(0, true);
+  if (magic !== 0xFEEDFACF) throw new Error("not a 64-bit Mach-O (magic 0x" + magic.toString(16) + ")");
+  const ncmds = dv.getUint32(16, true);
+  const segments = [];
+  let entry = null;
+  let off = 32;
+  for (let i = 0; i < ncmds; i++) {
+    const cmd = dv.getUint32(off, true), cmdsize = dv.getUint32(off + 4, true);
+    if (cmd === 0x19) {                    // LC_SEGMENT_64
+      let name = "";
+      for (let j = 0; j < 16; j++) {
+        const c = dv.getUint8(off + 8 + j);
+        if (!c) break;
+        name += String.fromCharCode(c);
+      }
+      segments.push({
+        name,
+        vmaddr: dv.getBigUint64(off + 24, true),
+        vmsize: dv.getBigUint64(off + 32, true),
+        fileoff: dv.getBigUint64(off + 40, true),
+        filesize: dv.getBigUint64(off + 48, true),
+      });
+    } else if (cmd === 0x5) {              // LC_UNIXTHREAD
+      // ARM_THREAD_STATE64: x0..x28, fp, lr, sp, pc, cpsr — pc is register index 32
+      entry = dv.getBigUint64(off + 16 + 32 * 8, true);
+    }
+    off += cmdsize;
+  }
+  return { segments, entry };
+}
+
+// ---- minimal Apple Device Tree ----
+function adtProp(name, value) {
+  const out = [];
+  const nb = new Uint8Array(32);
+  for (let i = 0; i < name.length && i < 32; i++) nb[i] = name.charCodeAt(i);
+  out.push(nb);
+  const sz = new Uint8Array(4);
+  new DataView(sz.buffer).setUint32(0, value.length, true);
+  out.push(sz);
+  out.push(value);
+  const pad = (4 - (value.length % 4)) % 4;
+  if (pad) out.push(new Uint8Array(pad));
+  return out;
+}
+// ADT integer property values are stored LITTLE-ENDIAN, in the machine's
+// native format — this is NOT the FDT/OpenFirmware big-endian cell format.
+// Proven from the kernel's own consumers (stage-5 frontier 3): XNU's
+// ml_readprop() raw-loads a uint32_t/uint64_t from the property bytes,
+// ml_read_reg_range() raw-loads a uint64_t pair, and
+// pe_arm_get_soc_base_phys() reads the arm-io "ranges" property as a
+// uintptr_t array whose element [1] is the SoC base. Encoding these
+// big-endian (as this file did through stage 5 round 1) silently feeds
+// the kernel byte-swapped garbage.
+function adtU32(v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v, true); return b; }
+function adtU64(v) { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, v, true); return b; }
+function adtStr(s) { const b = new Uint8Array(s.length + 1); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b; }
+function adtReg(addr, size) {
+  // A "reg" property is exactly two little-endian uint64s: (address, size)
+  // — ml_read_reg_range() panics on any other size.
+  const b = new Uint8Array(16), dv = new DataView(b.buffer);
+  dv.setBigUint64(0, addr, true);
+  dv.setBigUint64(8, size, true);
+  return b;
+}
+function adtRanges(list) {
+  // A "ranges" property is an array of little-endian uint64 triplets
+  // (childAddress, parentAddress, size) — pe_arm_get_soc_base_phys()
+  // reads element [1] of the first triplet as the SoC physical base that
+  // every child device's reg offset is added to.
+  const out = [];
+  for (const r of list) {
+    const b = new Uint8Array(24), dv = new DataView(b.buffer);
+    dv.setBigUint64(0, BigInt(r.childAddress), true);
+    dv.setBigUint64(8, BigInt(r.parentAddress), true);
+    dv.setBigUint64(16, BigInt(r.size), true);
+    out.push(b);
+  }
+  return concatBytes(out);
+}
+function adtNode(name, props, children) {
+  const allProps = [adtProp("name", adtStr(name)), ...props];
+  const head = new Uint8Array(8), dv = new DataView(head.buffer);
+  dv.setUint32(0, allProps.length, true);
+  dv.setUint32(4, children.length, true);
+  return concatBytes([head, ...allProps.flat(), ...children]);
+}
+function concatBytes(list) {
+  let n = 0;
+  for (const b of list) n += b.length;
+  const out = new Uint8Array(n);
+  let o = 0;
+  for (const b of list) { out.set(b, o); o += b.length; }
+  return out;
+}
+function buildADT(pack = BUILTIN_PACK) {
+  // A child device's ADT "reg" address is an OFFSET within its parent
+  // bus: the kernel's early consumers (pe_init's console mapping,
+  // pe_arm_map_interrupt_controller) compute the physical address as
+  // socBase + reg[0], where socBase is ranges[1] of the arm-io node.
+  // pack.uart.base is the full physical address (the emulator core's
+  // MMIO window), so the tree stores base - armIoBase.
+  const uartRegOffset = BigInt(pack.uart.base) - BigInt(pack.armIo.regAddress);
+  const uart0 = adtNode(pack.uart.name, [
+    adtProp("compatible", adtStr(pack.uart.compatible)),
+    adtProp("reg", adtReg(uartRegOffset, BigInt(pack.uart.size))),
+    adtProp("interrupts", concatBytes(pack.uart.interrupts.map(adtU32))),
+  ], []);
+  const armIoProps = [
+    adtProp("compatible", adtStr(pack.armIo.compatible)),
+    adtProp("device_type", adtStr(pack.armIo.deviceType)),
+    adtProp("#address-cells", adtU32(pack.armIo.addressCells)),
+    adtProp("#size-cells", adtU32(pack.armIo.sizeCells)),
+    adtProp("reg", adtReg(BigInt(pack.armIo.regAddress), BigInt(pack.armIo.regSize))),
+    adtProp("ranges", adtRanges(pack.armIo.ranges)),
+  ];
+  const armIo = adtNode(pack.armIo.name, armIoProps, [uart0]);
+  // /chosen/random-seed: real iBoot fills this from the hardware RNG. The
+  // pack carries a fixed byte string on purpose — the emulator stays
+  // deterministic run to run.
+  const seedHex = pack.deviceTree.randomSeedHex;
+  const seed = new Uint8Array(seedHex.length / 2);
+  for (let i = 0; i < seed.length; i++) seed[i] = parseInt(seedHex.substr(i * 2, 2), 16);
+  // /chosen/lock-regs: real iBoot describes the hardware lock apertures
+  // here; the kernel's lock-regs init panics if the node, its "amcc"
+  // child, or the amcc property set is missing (stage-5 frontier 14).
+  // The pack defines this fake machine's single aperture: one 16K page
+  // at the arm-io base (reads there behave as an idle lock page).
+  const lr = pack.lockRegs;
+  // The kernel's lock-regs reader fetches each named register as a
+  // <name>-reg-offset / -reg-mask / -reg-value u32 triplet. This fake
+  // machine's registers are inert (mask 0 = no bits affected).
+  const regProps = (regs) => (regs || []).flatMap(r => {
+    const ps = [adtProp(r.name + "-reg-offset", adtU32(r.offset)), adtProp(r.name + "-reg-mask", adtU32(r.mask))];
+    if (r.value !== undefined) ps.push(adtProp(r.name + "-reg-value", adtU32(r.value)));
+    return ps;
+  });
+  const ctrrA = adtNode(lr.ctrrA.name, [
+    adtProp("page-size-shift", adtU32(lr.ctrrA.pageSizeShift)),
+    adtProp("lower-limit", adtU64(BigInt(lr.ctrrA.lowerLimit))),
+    adtProp("upper-limit", adtU64(BigInt(lr.ctrrA.upperLimit))),
+    adtProp("lock", adtU32(lr.ctrrA.lock)),
+    adtProp("enable", adtU32(lr.ctrrA.enable)),
+    adtProp("write-disable", adtU32(lr.ctrrA.writeDisable)),
+    ...regProps(lr.ctrrA.regs),
+  ], []);
+  const amcc = adtNode(lr.amcc.name, [
+    adtProp("aperture-count", adtU32(lr.amcc.apertureCount)),
+    adtProp("aperture-size", adtU32(Number(BigInt(lr.amcc.apertureSize)))),
+    adtProp("plane-count", adtU32(lr.amcc.planeCount)),
+    adtProp("plane-stride", adtU32(lr.amcc.planeStride)),
+    adtProp("aperture-phys-addr", concatBytes(lr.amcc.aperturePhysAddr.map(a => adtU64(BigInt(a))))),
+    adtProp("cache-status", adtU32(lr.amcc.cacheStatus)),
+    ...regProps(lr.amcc.regs),
+  ], [ctrrA]);
+  const lockRegs = adtNode(lr.name, [], [amcc]);
+  const chosen = adtNode(pack.deviceTree.chosenNodeName, [
+    adtProp("random-seed", seed),
+    // arm_init() reads gDramBase/gDramSize from these two /chosen
+    // properties (raw uint64 loads) and panics if either is missing —
+    // real iBoot always supplies them (stage-5 frontier 4).
+    adtProp("dram-base", adtU64(BigInt(pack.memory.dramBase))),
+    adtProp("dram-size", adtU64(BigInt(pack.memory.memSize))),
+  ], [lockRegs]);
+  const memory = adtNode(pack.deviceTree.memoryNodeName, [
+    adtProp("reg", adtReg(BigInt(pack.memory.dramBase), BigInt(pack.memory.memSize))),
+  ], []);
+  // A13 (t8030): 4 Thunder efficiency cores (cluster 'E', MPIDR 0x00-0x03) and
+  // 2 Lightning performance cores (cluster 'P', MPIDR 0x100-0x101). The kernel's
+  // ml_parse_cpu_topology requires "state" ("running" = boot CPU) and "reg" on
+  // every cpu child; the rest have defaults. All of it comes from the pack.
+  const cpuNode = c => adtNode(c.name, [
+    adtProp("compatible", adtStr(c.compatible)),
+    adtProp("device_type", adtStr(pack.cpus.deviceType)),
+    adtProp("reg", adtU32(c.reg)),
+    adtProp("state", adtStr(c.state)),
+    adtProp("cluster-type", adtU32(c.clusterType)),
+  ], []);
+  const cpus = adtNode(pack.cpus.name, [
+    adtProp("#address-cells", adtU32(pack.cpus.addressCells)),
+    adtProp("#size-cells", adtU32(pack.cpus.sizeCells)),
+  ], pack.cpus.list.map(cpuNode));
+  const root = adtNode(pack.deviceTree.rootName, [
+    adtProp("compatible", adtStr(pack.deviceTree.rootCompatible)),
+    adtProp("model", adtStr(pack.deviceTree.model)),
+    adtProp("#address-cells", adtU32(pack.deviceTree.rootAddressCells)),
+    adtProp("#size-cells", adtU32(pack.deviceTree.rootSizeCells)),
+  ], [chosen, memory, cpus, armIo]);
+  return root;
+}
+
+// ---- boot_args (arm64, revision 2) ----
+function buildBootArgs(m, bootArgsAddr, adtAddr, adtLen, topOfKernelData, pack = BUILTIN_PACK) {
+  const L = pack.bootArgs.layout;            // field offsets (boot.h rev 2), from the pack
+  const virtBase = BigInt(pack.memory.kernelVirtBase), physBase = BigInt(pack.memory.kernelPhysBase);
+  const w64 = (off, v) => {                  // little-endian via machine writes
+    for (let i = 0; i < 8; i++) m.writeMem(bootArgsAddr + BigInt(off + i), (v >> BigInt(8 * i)) & 0xFFn, 1);
+  };
+  const w32 = (off, v) => {
+    for (let i = 0; i < 4; i++) m.writeMem(bootArgsAddr + BigInt(off + i), BigInt((v >>> (8 * i)) & 0xFF), 1);
+  };
+  const w16 = (off, v) => {
+    m.writeMem(bootArgsAddr + BigInt(off), BigInt(v & 0xFF), 1);
+    m.writeMem(bootArgsAddr + BigInt(off + 1), BigInt((v >> 8) & 0xFF), 1);
+  };
+  for (let i = 0; i < pack.bootArgs.structSize; i += 8) m.writeMem(bootArgsAddr + BigInt(i), 0n, 8);
+  w16(L.revision, pack.bootArgs.revision);   // Revision
+  w16(L.version, pack.bootArgs.version);     // Version
+  w64(L.virtBase, virtBase);                 // virtBase
+  w64(L.physBase, physBase);                 // physBase
+  w64(L.memSize, BigInt(pack.memory.memSize));  // memSize
+  w64(L.topOfKernelData, topOfKernelData);   // topOfKernelData
+  // Video (at L.video, 48 bytes): all zero = no framebuffer, serial console only
+  w32(L.machineType, pack.bootArgs.machineType);  // machineType
+  // deviceTreeP is a void* in boot_args (boot.h): the kernel stores it raw
+  // into PE_state.deviceTreeHead / DTRootNode and dereferences it as a VA,
+  // and SecureDTIsLockedDown() kvtophys()es it. Real iBoot therefore passes
+  // the tree's kernel VIRTUAL address (phystokv of its physical address),
+  // not the PA — passing the PA made the lockdown check read the DT as
+  // sitting below the kernel, taking the CTRR EXTRADATA path with a raw PA
+  // as segLOWEST and corrupting the physmap size (stage-5 frontier 2).
+  w64(L.deviceTreeP, adtAddr - physBase + virtBase);  // deviceTreeP (virtual)
+  w32(L.deviceTreeLength, adtLen);           // deviceTreeLength
+  const cmdline = pack.bootArgs.commandLine;
+  for (let i = 0; i < cmdline.length; i++) m.writeMem(bootArgsAddr + BigInt(L.commandLine + i), BigInt(cmdline.charCodeAt(i)), 1);
+  w64(L.bootFlags, BigInt(pack.bootArgs.bootFlags));  // bootFlags
+  w64(L.memSizeActual, BigInt(pack.memory.memSize));  // memSizeActual (mirrors memSize)
+}
+
+// ---- stage 4: the fake boot chain. On a real iPhone the chain is
+// BootROM (mask ROM in the SoC) -> LLB -> iBoot -> kernel. Each stage below
+// does the part of that layer's job the emulator actually depends on; the
+// kernel itself is the genuine kernelcache, loaded unmodified by "iBoot".
+function stageBootROM(m, bytes, log) {
+  // BootROM's real job: verify the next stage's image and jump to it. Here it
+  // validates the kernelcache container the chain will hand down.
+  if (bytes.length < 4) throw new Error("BootROM: image too small");
+  const magic = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+  if (magic !== 0xFEEDFACF) throw new Error("BootROM: bad Mach-O magic 0x" + magic.toString(16));
+  const parsed = parseMachO(bytes);
+  if (parsed.entry === null) throw new Error("BootROM: no LC_UNIXTHREAD entry point in this Mach-O");
+  log("BootROM: image verified (Mach-O arm64, " + bytes.length.toString() + " bytes) — handing off to LLB");
+  return parsed;
+}
+function stageLLB(m, log, pack = BUILTIN_PACK) {
+  // LLB's real job: bring up DRAM and load iBoot. In the emulator DRAM is the
+  // sparse page space (sized by the pack), created on demand.
+  log("LLB: DRAM up — " + (BigInt(pack.memory.memSize) / 0x40000000n).toString() + " GiB at 0x" + BigInt(pack.memory.dramBase).toString(16) + " — iBoot loaded, jumping");
+}
+function stageIBoot(m, bytes, parsed, log, pack = BUILTIN_PACK) {
+  const physBase = BigInt(pack.memory.kernelPhysBase), virtBase = BigInt(pack.memory.kernelVirtBase);
+  const { segments, entry } = parsed;
+  let kernelTop = physBase;
+  for (const s of segments) {
+    if (s.filesize === 0n) continue;
+    const phys = physBase + (s.vmaddr - virtBase);
+    m.loadBytes(phys, bytes.subarray(Number(s.fileoff), Number(s.fileoff + s.filesize)));
+    const end = phys + s.vmsize;
+    if (end > kernelTop) kernelTop = end;
+    log("iBoot: loaded " + s.name + " at phys 0x" + phys.toString(16) + " (" + s.filesize.toString() + " bytes)");
+  }
+  const pageMask = BigInt(pack.memory.pageSize) - 1n;
+  const align = a => (a + pageMask) & ~pageMask;
+  const bootArgsAddr = align(kernelTop) + BigInt(pack.bootLayout.bootArgsOffsetFromKernelTop);
+  const adtAddr = bootArgsAddr + BigInt(pack.bootLayout.adtOffsetFromBootArgs);
+  const adt = buildADT(pack);
+  m.loadBytes(adtAddr, adt);
+  const topOfKernelData = align(adtAddr + BigInt(adt.length));
+  buildBootArgs(m, bootArgsAddr, adtAddr, adt.length, topOfKernelData, pack);
+  const entryPhys = physBase + (entry - virtBase);
+  m.regs[0] = bootArgsAddr;                  // X0 = boot_args, as iBoot leaves it
+  m.pc = entryPhys;
+  m.sp = 0n;                                 // kernel sets its own stack
+  log("iBoot: kernel top phys 0x" + kernelTop.toString(16) +
+      ", boot_args at 0x" + bootArgsAddr.toString(16) +
+      ", ADT " + adt.length + " bytes at 0x" + adtAddr.toString(16));
+  log("iBoot: jumping to kernel — entry virt 0x" + entry.toString(16) + " -> phys 0x" + entryPhys.toString(16) + ", X0 = boot_args");
+  return { entryPhys, bootArgsAddr, adtAddr };
+}
+function bootKernel(m, bytes, log, pack = BUILTIN_PACK) {
+  const parsed = stageBootROM(m, bytes, log);
+  stageLLB(m, log, pack);
+  return stageIBoot(m, bytes, parsed, log, pack);
+}
+
+if (typeof module !== "undefined") module.exports = { parseMachO, buildADT, buildBootArgs, bootKernel, stageBootROM, stageLLB, stageIBoot, KC_PHYS_BASE, KC_VIRT_BASE, BUILTIN_PACK };
+
+</script>
+<script>
+"use strict";
+/* ================= FakeDevice site logic =================
+ * Auto download (pack: automatic from this site; kernel: try a direct
+ * range-extract from Apple's CDN, fall back to IPSW download + in-tab
+ * extraction), ZIP / IM4P / LZFSE unwrapping, and the machine UI. */
+
+// ---- LZFSE decoder: Apple's reference implementation compiled to wasm ----
+var LZFSE_WASM_B64 = "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AAB8AwAA/AMAAPwEAAD8BQAA/AYAAPwHAAD8CQAA/AsAAPwNAAD8DwAA/BMAAPwXAAD8GwAA/B8AAPwnAAD8LwAA/DcAAPw/AAD8TwAA/F8AAPxvAAD8fwAA/J8AAPy/AAD83wAA/P8AAPw/AQD8fwEA/L8BAPz/AQD8fwIA/P8CAPx/AwACAwIFAgMCCAIDAgUCAwIOAgMCBQIDAggCAwIFAgMCDgACAQQAAwH/AAIBBQADAf8AAgEGAAMB/wACAQcAAwH/AAAAAAEAAAADAAAABwAAAA8AAAAfAAAAPwAAAH8AAAD/AAAA/wEAAP8DAAD/BwAA/w8AAP8fAAD/PwAA/38AAP//AAD//wEA//8DAP//BwD//w8A//8fAP//PwD//38A////AP///wH///8D////B////w////8f////P////3//////AAAAAAAAAAAAAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAACgAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAAJAAAAAwAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAAkAAAADAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAACwAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAALAAAAAwAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAAsAAAADAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAACwAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAALAAAAAwAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAAQAAAADAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAABAAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAAEAAAAAwAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAAQAAAADAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAABAAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAAEAAAAAwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAAEAAAAAwAAAAEAAAABAAAAAQAAAAEAAAABAAAAAQAAAAQAAAADAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAABAAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAAEAAAAAwAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAgAAAAIAAAACAAAAAQAAAAEAAAABAAAAAQAAAAEAAAABAAAABAAAAAMAAAABAAAAAQAAAAEAAAABAAAAAQAAAAEAAAAEAAAAAwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAAIAAAABwAAAAcAAAAHAAAABwAAAAcAAAAHAAAABwAAAAcAAAAHAAAABwAAAAcAAAAHAAAABwAAAAcAAAAHAAAABgAAAAUAAAAFAAAABQAAAAUAAAAFAAAABQAAAAUAAAAFAAAABQAAAAUAAAAFAAAABQAAAAUAAAAFAAAABQAAAA==";
+var _lzfseExports = null;
+async function lzfseInit() {
+  if (_lzfseExports) return _lzfseExports;
+  var bin = atob(LZFSE_WASM_B64);
+  var bytes = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  var res = await WebAssembly.instantiate(bytes, {});
+  _lzfseExports = res.instance.exports;
+  return _lzfseExports;
+}
+async function lzfseDecode(src) {
+  var ex = await lzfseInit();
+  ex.fd_reset();
+  var inP = ex.fd_alloc(src.length);
+  var scrP = ex.fd_alloc(ex.fd_scratch_size());
+  var cap = Math.max(src.length * 4, 1 << 20);
+  var outP = ex.fd_alloc(cap);
+  new Uint8Array(ex.memory.buffer, inP, src.length).set(src);
+  var n = ex.fd_decode(outP, cap, inP, src.length, scrP);
+  if (n === 0) throw new Error("LZFSE decoder reported an error");
+  if (n >= cap) { // output may have been truncated — retry with a bigger buffer
+    var cap2 = cap * 3, out2 = ex.fd_alloc(cap2);
+    var n2 = ex.fd_decode(out2, cap2, inP, src.length, scrP);
+    if (n2 > n) return new Uint8Array(ex.memory.buffer, out2, n2).slice();
+  }
+  return new Uint8Array(ex.memory.buffer, outP, n).slice();
+}
+
+"use strict";
+/* Minimal DEFLATE decoder (RFC 1951), decode-only — written for FakeDevice
+ * to inflate ZIP entries in-tab. Handles stored, fixed-Huffman and
+ * dynamic-Huffman blocks. */
+function inflateRaw(data) {
+  let pos = 0, bitbuf = 0, bitcnt = 0;
+  const out = [];
+  function bits(n) {
+    while (bitcnt < n) { bitbuf |= data[pos++] << bitcnt; bitcnt += 8; }
+    const v = bitbuf & ((1 << n) - 1);
+    bitbuf >>>= n; bitcnt -= n;
+    return v;
+  }
+  function build(lengths) {
+    const counts = new Array(16).fill(0);
+    for (const l of lengths) counts[l]++;
+    counts[0] = 0;
+    const offs = new Array(16).fill(0);
+    for (let i = 1; i < 16; i++) offs[i] = offs[i - 1] + counts[i - 1];
+    const symbols = new Array(lengths.length);
+    for (let s = 0; s < lengths.length; s++)
+      if (lengths[s]) symbols[offs[lengths[s]]++] = s;
+    return { counts, symbols };
+  }
+  function decode(h) {
+    let code = 0, first = 0, index = 0;
+    for (let len = 1; len < 16; len++) {
+      code = (code << 1) | bits(1);
+      const count = h.counts[len];
+      if (code - first < count) return h.symbols[index + (code - first)];
+      index += count; first = (first + count) << 1;
+    }
+    throw new Error("invalid huffman code");
+  }
+  const LBASE = [3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];
+  const LEXT  = [0,0,0,0,0,0,0,0,1,1,1,1,2,2,2,2,3,3,3,3,4,4,4,4,5,5,5,5,0];
+  const DBASE = [1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];
+  const DEXT  = [0,0,0,0,1,1,2,2,3,3,4,4,5,5,6,6,7,7,8,8,9,9,10,10,11,11,12,12,13,13];
+  function block(litH, distH) {
+    for (;;) {
+      const sym = decode(litH);
+      if (sym < 256) out.push(sym);
+      else if (sym === 256) return;
+      else {
+        const li = sym - 257;
+        const len = LBASE[li] + bits(LEXT[li]);
+        const dsym = decode(distH);
+        const dist = DBASE[dsym] + bits(DEXT[dsym]);
+        let from = out.length - dist;
+        if (from < 0) throw new Error("distance too far back");
+        for (let i = 0; i < len; i++) out.push(out[from++]);
+      }
+    }
+  }
+  function stored() {
+    bits(bitcnt % 8); // align to byte boundary
+    function nextByte() {
+      if (bitcnt >= 8) { const b = bitbuf & 0xFF; bitbuf >>>= 8; bitcnt -= 8; return b; }
+      return data[pos++];
+    }
+    const lo = nextByte(), hi = nextByte();
+    const len = lo | (hi << 8);
+    nextByte(); nextByte(); // NLEN
+    for (let i = 0; i < len; i++) out.push(nextByte());
+  }
+  for (;;) {
+    const bfinal = bits(1), btype = bits(2);
+    if (btype === 0) stored();
+    else if (btype === 1) {
+      const ll = new Array(288), dl = new Array(30);
+      for (let i = 0; i < 288; i++) ll[i] = i < 144 ? 8 : i < 256 ? 9 : i < 280 ? 7 : 8;
+      for (let i = 0; i < 30; i++) dl[i] = 5;
+      block(build(ll), build(dl));
+    } else if (btype === 2) {
+      const hlit = bits(5) + 257, hdist = bits(5) + 1, hclen = bits(4) + 4;
+      const order = [16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];
+      const clen = new Array(19).fill(0);
+      for (let i = 0; i < hclen; i++) clen[order[i]] = bits(3);
+      const ch = build(clen);
+      const lengths = new Array(hlit + hdist).fill(0);
+      let i = 0;
+      while (i < hlit + hdist) {
+        const s = decode(ch);
+        if (s < 16) lengths[i++] = s;
+        else if (s === 16) { const r = 3 + bits(2), v = lengths[i - 1]; for (let k = 0; k < r; k++) lengths[i++] = v; }
+        else if (s === 17) i += 3 + bits(3);
+        else i += 11 + bits(7);
+      }
+      block(build(lengths.slice(0, hlit)), build(lengths.slice(hlit)));
+    } else throw new Error("bad block type");
+    if (bfinal) break;
+  }
+  return Uint8Array.from(out);
+}
+if (typeof module !== "undefined") module.exports = { inflateRaw };
+
+
+// ---- tiny DER walk for the IM4P container ----
+function im4pPayload(bytes) {
+  var p = 0;
+  function tlv() {
+    var tag = bytes[p++];
+    var len = bytes[p++];
+    if (len & 0x80) { var nb = len & 0x7f; len = 0; for (var i = 0; i < nb; i++) len = (len << 8) | bytes[p++]; }
+    var start = p; p += len;
+    return { tag: tag, start: start, len: len, end: p };
+  }
+  function ia5(t) { var s = ""; for (var i = t.start; i < t.end; i++) s += String.fromCharCode(bytes[i]); return s; }
+  var outer = tlv();
+  if (outer.tag !== 0x30) throw new Error("not an IM4P file");
+  p = outer.start; // descend into the SEQUENCE (tlv() skipped its content)
+  if (ia5(tlv()) !== "IM4P") throw new Error("not an IM4P file");
+  var fourcc = ia5(tlv());
+  tlv(); // description string
+  var pay = tlv();
+  if (pay.tag !== 0x04) throw new Error("IM4P payload not found");
+  return { fourcc: fourcc, payload: bytes.subarray(pay.start, pay.end) };
+}
+async function im4pToRawKernel(bytes) {
+  var un = im4pPayload(bytes);
+  if (un.fourcc !== "krnl") setupLog("note: IM4P fourcc is '" + un.fourcc + "', expected 'krnl'");
+  var raw = await lzfseDecode(un.payload);
+  return raw;
+}
+
+// ---- ZIP reading over a generic range reader {size, slice(a,b)->Promise<Uint8Array>} ----
+function blobReader(blob) {
+  return { size: blob.size, slice: function (a, b) { return blob.slice(a, b).arrayBuffer().then(function (ab) { return new Uint8Array(ab); }); } };
+}
+function httpRangeReader(url) {
+  var size = -1;
+  function range(a, b) { // inclusive a..b
+    return fetch(url, { headers: { "Range": "bytes=" + a + "-" + b } }).then(function (r) {
+      if (size < 0) { var cr = r.headers.get("Content-Range"); if (cr) size = parseInt(cr.split("/")[1], 10); }
+      if (r.status !== 206 && r.status !== 200) throw new Error("range request failed: HTTP " + r.status);
+      return r.arrayBuffer();
+    }).then(function (ab) { return new Uint8Array(ab); });
+  }
+  return {
+    size: function () {
+      if (size >= 0) return Promise.resolve(size);
+      return range(0, 0).then(function () { return size; });
+    },
+    slice: function (a, b) { return range(a, b - 1); }
+  };
+}
+function u16le(b, o) { return b[o] | (b[o + 1] << 8); }
+function u32le(b, o) { return (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0; }
+function u64le(b, o) { return Number(new DataView(b.buffer, b.byteOffset + o, 8).getBigUint64(0, true)); }
+async function zipFindEntry(reader, wantName) {
+  var size = (typeof reader.size === "function") ? await reader.size() : reader.size;
+  var tailLen = Math.min(size, 1 << 20);
+  var tail = await reader.slice(size - tailLen, size);
+  var ei = -1;
+  for (var i = tail.length - 22; i >= 0; i--) {
+    if (tail[i] === 0x50 && tail[i + 1] === 0x4b && tail[i + 2] === 0x05 && tail[i + 3] === 0x06) { ei = i; break; }
+  }
+  if (ei < 0) throw new Error("not a ZIP file (no end-of-directory record)");
+  var cdSize = u32le(tail, ei + 12), cdOff = u32le(tail, ei + 16);
+  if (cdSize === 0xFFFFFFFF || cdOff === 0xFFFFFFFF) {
+    var locOff = size - tailLen + ei - 20;
+    var loc = await reader.slice(locOff, locOff + 20);
+    if (!(loc[0] === 0x50 && loc[1] === 0x4b && loc[2] === 0x06 && loc[3] === 0x07)) throw new Error("ZIP64 locator not found");
+    var recOff = u64le(loc, 8);
+    var rec = await reader.slice(recOff, recOff + 56);
+    cdSize = u64le(rec, 40); cdOff = u64le(rec, 48);
+  }
+  var cd = await reader.slice(cdOff, cdOff + cdSize);
+  var pos = 0;
+  while (pos + 46 <= cd.length) {
+    if (!(cd[pos] === 0x50 && cd[pos + 1] === 0x4b && cd[pos + 2] === 0x01 && cd[pos + 3] === 0x02)) break;
+    var method = u16le(cd, pos + 10);
+    var csize = u32le(cd, pos + 20), usize = u32le(cd, pos + 24);
+    var nlen = u16le(cd, pos + 28), elen = u16le(cd, pos + 30), clen = u16le(cd, pos + 32);
+    var lhofs = u32le(cd, pos + 42);
+    var name = "";
+    for (var i = 0; i < nlen; i++) name += String.fromCharCode(cd[pos + 46 + i]);
+    if (usize === 0xFFFFFFFF || csize === 0xFFFFFFFF || lhofs === 0xFFFFFFFF) {
+      var ep = pos + 46 + nlen, eend = ep + elen;
+      while (ep + 4 <= eend) {
+        var tag = u16le(cd, ep), esz = u16le(cd, ep + 2), bp = ep + 4;
+        if (tag === 0x0001) {
+          if (usize === 0xFFFFFFFF) { usize = u64le(cd, bp); bp += 8; }
+          if (csize === 0xFFFFFFFF) { csize = u64le(cd, bp); bp += 8; }
+          if (lhofs === 0xFFFFFFFF) { lhofs = u64le(cd, bp); bp += 8; }
+        }
+        ep += 4 + esz;
+      }
+    }
+    if (name === wantName) return { name: name, method: method, csize: csize, usize: usize, lhofs: lhofs };
+    pos += 46 + nlen + elen + clen;
+  }
+  return null;
+}
+async function zipEntryBytes(reader, entry) {
+  var lh = await reader.slice(entry.lhofs, entry.lhofs + 30);
+  var dataOff = entry.lhofs + 30 + u16le(lh, 26) + u16le(lh, 28);
+  var comp = await reader.slice(dataOff, dataOff + entry.csize);
+  if (entry.method === 0) return comp;
+  if (entry.method === 8) return inflateRaw(comp);
+  throw new Error("unsupported ZIP compression method " + entry.method);
+}
+var KERNEL_ENTRY = "kernelcache.release.iphone12b";
+async function extractKernelFromReader(reader) {
+  var entry = await zipFindEntry(reader, KERNEL_ENTRY);
+  if (!entry) throw new Error("this ZIP has no " + KERNEL_ENTRY + " entry — it has to be the iPhone 11 (iPhone12,1) IPSW");
+  setupLog("found " + entry.name + ": " + entry.csize.toLocaleString("en-US") + " bytes in the archive (method " + entry.method + ")");
+  var im4p = await zipEntryBytes(reader, entry);
+  setupLog("archive entry unpacked: " + im4p.length.toLocaleString("en-US") + " bytes (IM4P)");
+  return im4pToRawKernel(im4p);
+}
+
+// ---- acquisition state ----
+var IPSW_URL = "https://updates.cdn-apple.com/2021FallFCS/fullrestores/071-97929/2567B0BA-F9C0-4181-9D2B-E4535D65518B/iPhone11,8,iPhone12,1_14.8_18H17_Restore.ipsw";
+var EXPECTED_KERNEL_SHA256 = "2bf684f41f79bd309e70398b6116eb2054e217892daa52e919bdfd7634e4f246";
+var loadedPack = null;
+var currentKernel = null;
+function setupLog(s) { logEl.textContent += "[setup] " + s + "\n"; }
+function sha256Hex(bytes) {
+  return crypto.subtle.digest("SHA-256", bytes).then(function (h) {
+    return Array.from(new Uint8Array(h)).map(function (b) { return ("0" + b.toString(16)).slice(-2); }).join("");
+  });
+}
+function isMachO(b) { return b.length > 4 && b[0] === 0xcf && b[1] === 0xfa && b[2] === 0xed && b[3] === 0xfe; }
+
+function loadPack(obj, origin) {
+  if (!obj || !obj.memory || !obj.bootArgs || !obj.machine) throw new Error("that doesn't look like a translator pack");
+  loadedPack = obj;
+  document.getElementById('packstatus').innerHTML =
+    "<span class='ok'>loaded: " + obj.machineName + " (" + obj.soc + "), pack version " + obj.packVersion + " — " + origin + "</span>";
+  setupLog("translator pack loaded (" + origin + "): " + obj.machineName + " / " + obj.soc);
+}
+async function setKernel(bytes, origin) {
+  if (!isMachO(bytes)) throw new Error("the result is not a Mach-O kernel — extraction failed");
+  currentKernel = bytes;
+  var hexs = (window.crypto && crypto.subtle) ? await sha256Hex(bytes) : "(unavailable)";
+  document.getElementById('kstatus').innerHTML =
+    "<span class='ok'>ready: " + bytes.length.toLocaleString("en-US") + " bytes (" + origin + ")</span>";
+  setupLog("kernel ready (" + origin + "): " + bytes.length.toLocaleString("en-US") + " bytes");
+  setupLog("kernel SHA-256: " + hexs + (hexs === EXPECTED_KERNEL_SHA256 ? " — matches the genuine iOS 14.8 kernelcache fingerprint" : ""));
+  startKernel(bytes);
+}
+async function handleKernelFile(file) {
+  setupLog("reading " + file.name + " (" + file.size.toLocaleString("en-US") + " bytes)…");
+  try {
+    var head = new Uint8Array(await file.slice(0, 64).arrayBuffer());
+    if (head[0] === 0x50 && head[1] === 0x4b) {           // ZIP / IPSW
+      setupLog("that is a ZIP (IPSW) — extracting the kernelcache here in the page…");
+      var raw = await extractKernelFromReader(blobReader(file));
+      await setKernel(raw, "extracted from " + file.name);
+    } else if (head[0] === 0x30) {                          // DER SEQUENCE → IM4P
+      var all = new Uint8Array(await file.arrayBuffer());
+      setupLog("that is an IM4P kernelcache — unwrapping and LZFSE-decoding…");
+      await setKernel(await im4pToRawKernel(all), file.name);
+    } else if (isMachO(head)) {                             // raw kernelcache
+      var rawb = new Uint8Array(await file.arrayBuffer());
+      await setKernel(rawb, file.name);
+    } else {
+      setupLog("couldn't recognise that file — it isn't an IPSW/ZIP, an IM4P kernelcache, or a raw kernelcache.");
+    }
+  } catch (e) { setupLog("kernel load FAILED: " + e.message); }
+}
+
+// On open: (1) auto-download the translator pack from this site.
+//          (2) resolve the IPSW address from ipsw.me (its API allows pages).
+//          (3) try the direct range-extract from Apple's CDN — expected to be
+//              refused by the browser (Apple sends no CORS permission); on
+//              refusal, point at the download button instead.
+async function autoAcquire() {
+  try {
+    var r = await fetch("translator-pack-iphone11.json");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    loadPack(await r.json(), "downloaded automatically from this site");
+  } catch (e) {
+    document.getElementById('packstatus').innerHTML = "<span class='warn'>site download failed (" + e.message + ") — using the pack built into the emulator core; you can also import one below</span>";
+    setupLog("translator pack auto-download failed: " + e.message + " — the core's built-in copy will be used");
+  }
+  try {
+    var api = await (await fetch("https://api.ipsw.me/v4/device/iPhone12,1?type=ipsw")).json();
+    var fw = (api.firmwares || []).filter(function (f) { return f.version === "14.8"; })[0];
+    if (fw && fw.url) { IPSW_URL = fw.url; document.getElementById('ipswlink').href = IPSW_URL; }
+  } catch (e) { /* keep the built-in address */ }
+  try {
+    setupLog("trying to pull the kernel straight out of Apple's IPSW…");
+    var raw2 = await extractKernelFromReader(httpRangeReader(IPSW_URL));
+    await setKernel(raw2, "downloaded automatically from Apple");
+  } catch (e) {
+    setupLog("Apple's server doesn't allow web pages to reach inside the IPSW, so the fully automatic kernel download stops here (" + e.message + "). Use the blue button above to download the IPSW from Apple, then drop the file back on this page — the page extracts the kernel itself.");
+  }
+}
+
+// ---------------- machine UI (from the stage pages) ----------------
+var TEST_B64 = "AKSm0kAAwPKhAgAQIhRAOGIAADQCIAC5/f//FwMAgNIkAIDSYwAEi4QEAJGfLADxq///VEUBgNJmCMWax4wFm8bAABEGIAC558AAEQcgALlCAYBSAiAAuQAAQNR0ZXN0CgA=";
+var machine = null;
+var running = false;
+var uartEl = document.getElementById('uart');
+var logEl = document.getElementById('log');
+var bdEl = document.getElementById('bdout');
+
+function bd(s) { bdEl.textContent += s + "\n"; bdEl.scrollTop = bdEl.scrollHeight; }
+function hex(v) { return "0x" + v.toString(16); }
+function newMachine() {
+  machine = createMachine(function (b) { uartEl.textContent += String.fromCharCode(b); },
+                          function (s) { logEl.textContent += "[emu] " + s + "\n"; });
+  window.fakedevice = machine;
+  return machine;
+}
+function updateStatus() {
+  if (!machine) return;
+  var s = "status: " + machine.status + " | instructions: " + machine.icount.toLocaleString("en-US") +
+          " | MMU: " + (machine.mmuOn ? "ON" : "off") + " | PC: " + hex(machine.pc) + " | SP: " + hex(machine.sp) +
+          " | exceptions delivered: " + machine.exceptions;
+  if (machine.lastException) s += "\nlast exception: " + machine.lastException;
+  if (machine.trapInfo) s += "\nstop reason: " + machine.trapInfo;
+  document.getElementById('status').textContent = s;
+}
+function runChunks() {
+  if (!machine) return;
+  running = true;
+  var tick = function () {
+    if (!running) { updateStatus(); return; }
+    var pcBefore = machine.pc;
+    machine.run(2000000);
+    updateStatus();
+    if (machine.status === "ready" && machine.pc === pcBefore) {
+      running = false;
+      bd("kernel settled — PC has not moved for a whole run chunk (" + hex(machine.pc) + "). At the current frontier the kernel sits in a wait loop here; that's the frontier being mapped, not the emulator stopping it.");
+      return;
+    }
+    if (machine.status === "ready") setTimeout(tick, 0);
+    else { running = false; bd("machine stopped: " + machine.status + (machine.trapInfo ? " — " + machine.trapInfo : "")); }
+  };
+  tick();
+}
+function b64ToBytes(b64) {
+  var bin = atob(b64), out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+document.getElementById('selftest').addEventListener('click', function () {
+  newMachine();
+  uartEl.textContent = ""; logEl.textContent = "";
+  machine.loadBytes(DRAM_BASE, b64ToBytes(TEST_B64));
+  machine.pc = DRAM_BASE;
+  bd("self-test loaded at " + hex(DRAM_BASE) + " — running.");
+  runChunks();
+});
+
+function startKernel(bytes) {
+  newMachine();
+  uartEl.textContent = ""; logEl.textContent = "";
+  try {
+    bootKernel(machine, bytes, function (s) { logEl.textContent += "[boot] " + s + "\n"; }, loadedPack || undefined);
+  } catch (e) { bd("boot failed: " + e.message); return; }
+  bd("boot chain finished — kernel running.");
+  runChunks();
+}
+document.getElementById('boot').addEventListener('click', function () {
+  var f = document.getElementById('kfile').files[0];
+  if (f) { handleKernelFile(f); return; }
+  if (currentKernel) { startKernel(currentKernel); return; }
+  bd("No kernel yet — drop the IPSW (or a kernelcache file) on the page first; the page extracts the kernel itself.");
+});
+document.getElementById('kfile').addEventListener('change', function () {
+  var f = document.getElementById('kfile').files[0];
+  if (f) handleKernelFile(f);
+});
+document.getElementById('packfile').addEventListener('change', function () {
+  var f = document.getElementById('packfile').files[0];
+  if (!f) return;
+  f.text().then(function (t) {
+    try { loadPack(JSON.parse(t), "imported from " + f.name); }
+    catch (e) { setupLog("pack import FAILED: " + e.message); }
+  });
+});
+var dz = document.getElementById('dropzone');
+dz.addEventListener('dragover', function (e) { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', function () { dz.classList.remove('drag'); });
+dz.addEventListener('drop', function (e) {
+  e.preventDefault(); dz.classList.remove('drag');
+  var f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) handleKernelFile(f);
+});
+document.getElementById('pause').addEventListener('click', function () {
+  running = false;
+  updateStatus();
+  bd("paused. Use step/run here, or press Boot/self-test to start over.");
+});
+
+// ---------------- backdoor ----------------
+function parseNum(s) {
+  s = String(s).trim();
+  if (s.toLowerCase().indexOf("0x") === 0) s = s.slice(2);
+  return BigInt("0x" + s);
+}
+function hexDump(addr, bytes) {
+  var lines = [];
+  for (var i = 0; i < bytes.length; i += 16) {
+    var h = "", a = "";
+    for (var j = i; j < Math.min(i + 16, bytes.length); j++) {
+      var b = bytes[j];
+      h += ("0" + b.toString(16)).slice(-2) + " ";
+      a += (b >= 32 && b < 127) ? String.fromCharCode(b) : ".";
+    }
+    while (h.length < 48) h += " ";
+    lines.push(hex(addr + BigInt(i)) + "  " + h + " " + a);
+  }
+  return lines.join("\n");
+}
+function parseBytes(s) {
+  s = s.replace(/[^0-9a-fA-F]/g, "");
+  var out = [];
+  for (var i = 0; i + 1 < s.length + 1 && i + 2 <= s.length; i += 2) out.push(parseInt(s.substr(i, 2), 16));
+  return out;
+}
+function needMachine() { if (!machine) { bd("No machine yet — run the self-test or boot the kernel first."); return false; } return true; }
+
+function bdCommand(raw) {
+  var line = raw.trim();
+  if (!line) return;
+  bd("> " + line);
+  var parts = line.split(/\s+/);
+  var cmd = parts[0].toLowerCase();
+  try {
+    if (cmd === "help") {
+      bd("regs | sysregs | status | lastpc | mmio\n" +
+         "peek <addr> [len] — memory through the page tables (kernel's view)\n" +
+         "peekp <addr> [len] — raw physical memory\n" +
+         "poke <addr> <hexbytes> | pokep <addr> <hexbytes>\n" +
+         "setreg <x0..x30|sp|pc> <value>\n" +
+         "bp <addr> | bplist | bpclear — breakpoints\n" +
+         "step [n] | run [n] — execute (run default 1,000,000, cap 20,000,000)\n" +
+         "patch <addr> <word> — overwrite one 4-byte instruction (hex, e.g. d503201f = nop)\n" +
+         "uartin <text> — type text into the fake phone's serial port");
+      return;
+    }
+    if (!needMachine()) return;
+    if (cmd === "status") { updateStatus(); bd(document.getElementById('status').textContent); }
+    else if (cmd === "regs") {
+      var out = [];
+      for (var i = 0; i <= 30; i++) out.push("X" + i + " = " + hex(machine.regs[i]));
+      out.push("SP = " + hex(machine.sp) + " | PC = " + hex(machine.pc) + " | status = " + machine.status);
+      bd(out.join("\n"));
+    }
+    else if (cmd === "sysregs") {
+      var rows = [];
+      machine.sysregs.forEach(function (v, k) { rows.push("S(" + k + ") = " + hex(v)); });
+      bd(rows.length ? rows.sort().join("\n") : "(no system registers written yet)");
+    }
+    else if (cmd === "lastpc") { bd(machine.lastPcs(16).map(hex).join(" ")); }
+    else if (cmd === "mmio") {
+      var rows2 = [];
+      machine.mmioLog.forEach(function (v, k) { rows2.push(k + " touched x" + v); });
+      bd(rows2.length ? rows2.join("\n") : "(no stub-MMIO touches yet)");
+    }
+    else if (cmd === "peek" || cmd === "peekp") {
+      var addr = parseNum(parts[1]), len = parts[2] ? Number(parseNum(parts[2])) : 64;
+      if (len > 4096) len = 4096;
+      var bytes;
+      if (cmd === "peek") bytes = machine.peekQuiet(addr, len);
+      else { bytes = new Uint8Array(len); for (var q = 0; q < len; q++) bytes[q] = Number(machine.readPhys(addr + BigInt(q), 1)); }
+      bd(hexDump(addr, bytes));
+    }
+    else if (cmd === "poke" || cmd === "pokep") {
+      var addr2 = parseNum(parts[1]), bs = parseBytes(parts.slice(2).join(""));
+      if (cmd === "poke") machine.pokeQuiet(addr2, bs);
+      else for (var w = 0; w < bs.length; w++) machine.writePhys(addr2 + BigInt(w), BigInt(bs[w]), 1);
+      bd("wrote " + bs.length + " byte(s) at " + hex(addr2));
+    }
+    else if (cmd === "setreg") {
+      var name = parts[1].toLowerCase(), val = parseNum(parts[2]);
+      if (name === "pc") machine.pc = val;
+      else if (name === "sp") machine.sp = val;
+      else if (name.charAt(0) === "x") machine.regs[Number(name.slice(1))] = val;
+      else { bd("unknown register: " + name); return; }
+      bd(name + " = " + hex(val));
+      updateStatus();
+    }
+    else if (cmd === "bp") { machine.addBreakpoint(parseNum(parts[1])); bd("breakpoint set at " + parts[1]); }
+    else if (cmd === "bplist") { bd(machine.breakpoints.size ? Array.from(machine.breakpoints).join(", ") : "(no breakpoints)"); }
+    else if (cmd === "bpclear") { machine.clearBreakpoints(); bd("breakpoints cleared"); }
+    else if (cmd === "step") {
+      var n = parts[1] ? Number(parts[1]) : 1;
+      if (n > 100000) n = 100000;
+      var done = 0;
+      while (done < n && machine.step()) done++;
+      bd("stepped " + done + " — PC " + hex(machine.pc) + ", status " + machine.status);
+      updateStatus();
+    }
+    else if (cmd === "run") {
+      var n2 = parts[1] ? Number(parts[1]) : 1000000;
+      if (n2 > 20000000) n2 = 20000000;
+      machine.run(n2);
+      bd("ran — PC " + hex(machine.pc) + ", status " + machine.status + (machine.trapInfo ? " — " + machine.trapInfo : ""));
+      updateStatus();
+    }
+    else if (cmd === "patch") {
+      var addr3 = parseNum(parts[1]), word = parseNum(parts[2]) & 0xFFFFFFFFn;
+      var bs2 = [Number(word & 0xFFn), Number((word >> 8n) & 0xFFn), Number((word >> 16n) & 0xFFn), Number((word >> 24n) & 0xFFn)];
+      machine.pokeQuiet(addr3, bs2);
+      bd("patched instruction at " + hex(addr3) + " -> 0x" + word.toString(16).padStart(8, "0"));
+    }
+    else if (cmd === "uartin") {
+      machine.queueUartRx(line.slice(7) + "\n");
+      bd("queued serial input: " + line.slice(7));
+    }
+    else bd("unknown command — type help");
+  } catch (e) { bd("error: " + e.message); }
+}
+
+document.getElementById('bdrun').addEventListener('click', function () {
+  var inp = document.getElementById('bdin');
+  bdCommand(inp.value);
+  inp.value = "";
+  inp.focus();
+});
+document.getElementById('bdin').addEventListener('keydown', function (e) {
+  if (e.key === "Enter") document.getElementById('bdrun').click();
+});
+
+// Kick off the auto download now that every handler exists.
+autoAcquire();
+
+</script>
+</body>
+</html>
