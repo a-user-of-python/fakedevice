@@ -26,6 +26,7 @@ public struct TranslatorPack: Codable {
     public var bootArgs: BootArgs
     public var aic: Aic
     public var timer: Timer
+    public var defaults: Defaults
     public var lockRegs: LockRegs
 
     public struct Memory: Codable {
@@ -91,6 +92,12 @@ public struct TranslatorPack: Codable {
         public var regOffset: String
         public var regSize: String
         public var phandle: UInt32
+    }
+    // The root-level "defaults" node (stage-5 frontier 22): its
+    // serial-device property (built in Boot.swift) carries the console
+    // UART's phandle.
+    public struct Defaults: Codable {
+        public var name: String
     }
     public struct LockRegs: Codable {
         public var name: String
