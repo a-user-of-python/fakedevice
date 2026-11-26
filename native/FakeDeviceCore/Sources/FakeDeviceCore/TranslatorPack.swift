@@ -24,6 +24,7 @@ public struct TranslatorPack: Codable {
     public var cpus: Cpus
     public var deviceTree: DeviceTree
     public var bootArgs: BootArgs
+    public var lockRegs: LockRegs
 
     public struct Memory: Codable {
         public var dramBase: String
@@ -53,7 +54,43 @@ public struct TranslatorPack: Codable {
         public var sizeCells: UInt32
         public var regAddress: String
         public var regSize: String
-        public var rangesEmpty: Bool
+        public var ranges: [Range]
+        public struct Range: Codable {
+            public var childAddress: String
+            public var parentAddress: String
+            public var size: String
+        }
+    }
+    public struct LockRegs: Codable {
+        public var name: String
+        public var amcc: Amcc
+        public var ctrrA: CtrrA
+        public struct Reg: Codable {
+            public var name: String
+            public var offset: UInt32
+            public var mask: UInt32
+            public var value: UInt32?
+        }
+        public struct Amcc: Codable {
+            public var name: String
+            public var apertureCount: UInt32
+            public var apertureSize: String
+            public var planeCount: UInt32
+            public var planeStride: UInt32
+            public var aperturePhysAddr: [String]
+            public var cacheStatus: UInt32
+            public var regs: [Reg]
+        }
+        public struct CtrrA: Codable {
+            public var name: String
+            public var pageSizeShift: UInt32
+            public var lowerLimit: String
+            public var upperLimit: String
+            public var lock: UInt32
+            public var enable: UInt32
+            public var writeDisable: UInt32
+            public var regs: [Reg]
+        }
     }
     public struct Cpus: Codable {
         public var name: String
@@ -123,6 +160,9 @@ public struct TranslatorPack: Codable {
                          pack.uart.base, pack.uart.size, pack.uart.registers.utrstat,
                          pack.uart.registers.utxh, pack.uart.registers.urxh,
                          pack.armIo.regAddress, pack.armIo.regSize, pack.bootArgs.bootFlags]
+            + pack.armIo.ranges.flatMap { [$0.childAddress, $0.parentAddress, $0.size] }
+            + [pack.lockRegs.amcc.apertureSize, pack.lockRegs.ctrrA.lowerLimit, pack.lockRegs.ctrrA.upperLimit]
+            + pack.lockRegs.amcc.aperturePhysAddr
         for hex in hexFields where TranslatorPack.parseHex(hex) == nil {
             throw BootError("translator pack has a bad hex value: \(hex)")
         }
