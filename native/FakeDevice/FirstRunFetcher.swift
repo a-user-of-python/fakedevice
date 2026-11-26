@@ -319,15 +319,14 @@ struct FirstRunFetcher {
         }
         var out = Data()
         out.reserveCapacity(expectedSize)
-        // The stream starts with NULL pointers — the documented
-        // pattern. (0.1.0 force-unwrapped UnsafeMutablePointer(
-        // bitPattern: 0) here, which is nil: an instant crash the
-        // moment this function ran.)
-        var stream = compression_stream(dst_ptr: nil,
-                                        dst_size: 0,
-                                        src_ptr: nil,
-                                        src_size: 0,
-                                        state: nil)
+        // The stream starts zero-initialized (NULL pointers, the
+        // pattern Apple's Compression samples use). 0.1.0 built it
+        // with UnsafeMutablePointer(bitPattern: 0)! — that initializer
+        // returns nil for address 0, so the force unwrap crashed the
+        // app the moment this function ran. (Passing nil literals to
+        // the memberwise initializer does not compile: the overlay
+        // declares the pointer fields non-optional.)
+        var stream = compression_stream()
         guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
             throw FetcherError.badData("could not start the deflate decoder")
         }
