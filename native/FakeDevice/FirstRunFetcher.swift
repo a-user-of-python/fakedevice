@@ -329,10 +329,11 @@ struct FirstRunFetcher {
         // UnsafeMutablePointer(bitPattern: 0)! — that initializer
         // returns nil for address 0, so the force unwrap crashed the
         // app the moment this function ran.)
-        var scratch: UInt8 = 0
-        var stream = compression_stream(dst_ptr: &scratch,
+        var scratchDst: UInt8 = 0
+        var scratchSrc: UInt8 = 0
+        var stream = compression_stream(dst_ptr: &scratchDst,
                                         dst_size: 0,
-                                        src_ptr: &scratch,
+                                        src_ptr: &scratchSrc,
                                         src_size: 0,
                                         state: nil)
         guard compression_stream_init(&stream, COMPRESSION_STREAM_DECODE, COMPRESSION_ZLIB) == COMPRESSION_STATUS_OK else {
