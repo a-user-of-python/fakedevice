@@ -234,12 +234,12 @@ if CommandLine.arguments.count > 1 {
                 for r in 0...30 { parts.append(String(m.x[r], radix: 16)) }
                 print(parts.joined(separator: " "))
             }
-            m.run(50_000_000)
-            var t = 50_000_000
+            m.run(69_000_000)
+            var t = 69_000_000
             snap(t)
-            while t < 100_000_000 {
-                m.run(1_000_000)
-                t += 1_000_000
+            while t < 70_000_000 {
+                m.run(100_000)
+                t += 100_000
                 snap(t)
             }
             exit(0)
