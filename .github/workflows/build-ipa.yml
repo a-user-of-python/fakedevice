@@ -108,4 +108,4 @@ jobs:
       - name: Run fakedevice-check with the real kernel (parity gate)
         run: |
           native/FakeDeviceCore/.build/release/fakedevice-check \
-            /tmp/kernelcache.raw build/translator-pack-iphone11.json
+            /tmp/kernelcache.raw build/translator-pack-iphone11.json trace
