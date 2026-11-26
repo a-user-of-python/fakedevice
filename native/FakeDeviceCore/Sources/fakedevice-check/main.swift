@@ -6,13 +6,14 @@
 //   sdiv        — the reference's SDIV semantics (probe-verified against JS)
 //   simd        — test_simd.mjs's 30 checks on the same program bytes
 //   mul         — test_mul.mjs's 14 checks on the same program bytes
-//   adt         — buildADT length is 2,740 bytes, like the reference
+//   adt         — buildADT length is 4,148 bytes, like the reference
 //   kernel boot — with a kernelcache path argument: the Swift core must
-//                 reach the reference's exact endpoint, measured from the
-//                 JS core the same day (the boot frontier moves as the
-//                 reference improves): the first exception (an undefined
-//                 instruction) is delivered at instruction 17,723,144 and
-//                 the kernel parks at 0xFFFFFFF0081BA410.
+//                 track the reference's exact trajectory, measured from
+//                 the JS core the same day (the boot frontier moves as
+//                 the reference improves): identical PC at 50M / 100M /
+//                 150M / 200M instructions with ZERO exceptions delivered
+//                 (the frontier-20 endpoint class: still executing at
+//                 200M, PC 0xFFFFFFF007BD164C).
 //
 // The machine definition arrives as DATA: the harness loads the
 // translator pack (argv[2], else the repo's build/ copy) exactly like
@@ -54,6 +55,26 @@ chkEq("pack kernel virt base", pack.kernelVirtBase, 0xFFFFFFF007004000)
 chkEq("pack UART base", pack.uartBase, 0x235200000)
 chkEq("pack CPU count", pack.cpus.list.count, 6)
 chkEq("pack boot CPU state", pack.cpus.list[0].state, "running")
+// packcheck-equivalent assertions (the JS packcheck proves the reference's
+// built-in pack copy equals the published JSON; these pin the fields the
+// Swift side must consume verbatim — real arm-io ranges and lock-regs).
+chkEq("pack arm-io ranges count", pack.armIo.ranges.count, 1)
+chkEq("pack arm-io ranges child", pack.armIo.ranges[0].childAddress, "0x0")
+chkEq("pack arm-io ranges parent", pack.armIo.ranges[0].parentAddress, "0x200000000")
+chkEq("pack arm-io ranges size", pack.armIo.ranges[0].size, "0x100000000")
+chkEq("pack lock-regs node name", pack.lockRegs.name, "lock-regs")
+chkEq("pack lock-regs amcc name", pack.lockRegs.amcc.name, "amcc")
+chkEq("pack lock-regs amcc aperture count", pack.lockRegs.amcc.apertureCount, 1)
+chkEq("pack lock-regs amcc aperture size", pack.lockRegs.amcc.apertureSize, "0x4000")
+chkEq("pack lock-regs amcc plane count", pack.lockRegs.amcc.planeCount, 1)
+chkEq("pack lock-regs amcc aperture phys", pack.lockRegs.amcc.aperturePhysAddr, ["0x200000000"])
+chkEq("pack lock-regs amcc regs count", pack.lockRegs.amcc.regs.count, 1)
+chkEq("pack lock-regs amcc reg name", pack.lockRegs.amcc.regs[0].name, "cache-status")
+chkEq("pack lock-regs ctrr-a name", pack.lockRegs.ctrrA.name, "amcc-ctrr-a")
+chkEq("pack lock-regs ctrr-a page size shift", pack.lockRegs.ctrrA.pageSizeShift, 14)
+chkEq("pack lock-regs ctrr-a lower limit", pack.lockRegs.ctrrA.lowerLimit, "0x800000000")
+chkEq("pack lock-regs ctrr-a upper limit", pack.lockRegs.ctrrA.upperLimit, "0x900000000")
+chkEq("pack lock-regs ctrr-a regs count", pack.lockRegs.ctrrA.regs.count, 5)
 
 func wordsMachine(_ words: [UInt32]) -> Machine {
     let m = Machine(onUart: { _ in }, onLog: { _ in }, definition: def)
@@ -171,7 +192,7 @@ do {
 }
 
 // MARK: ADT
-chkEq("ADT length", buildADT(pack).count, 2740)
+chkEq("ADT length", buildADT(pack).count, 4148)
 
 // MARK: kernel boot parity (needs the kernelcache path)
 if CommandLine.arguments.count > 1 {
@@ -187,30 +208,47 @@ if CommandLine.arguments.count > 1 {
         chk("boot chain completed", true)
         chk("boot log names BootROM stage", logs.contains { $0.hasPrefix("BootROM:") })
         let m = core.machine
-        m.run(17_000_000)
-        chkEq("icount before final approach", m.icount, 17_000_000)
-        var guardSteps = 0
-        while m.exceptions == 0 && guardSteps < 2_000_000 { _ = m.step(); guardSteps += 1 }
-        chkEq("first exception delivered at icount", m.icount, 17_723_144)
-        chkEq("exceptions after delivery", m.exceptions, 1)
-        chkEq("ESR_EL1", m.sysregValue(3, 0, 5, 2, 0), 0x2000000)
-        chkEq("FAR_EL1", m.sysregValue(3, 0, 6, 0, 0), 0)
-        chkEq("ELR_EL1", m.sysregValue(3, 0, 4, 0, 1), 0xFFFFFFF007A9AFD8)
-        chkEq("SPSR_EL1", m.sysregValue(3, 0, 4, 0, 0), 0x600003C5)
-        chkEq("PC after delivery (VBAR+0x200)", m.pc, 0xFFFFFFF0081B9200)
-        chkEq("lastException text", m.lastException, "undefined instruction, ELR 0xfffffff007a9afd8 -> vector 0xfffffff0081b9200")
-        // step on until the kernel parks itself in its own hang loop
-        var parkSteps = 0
-        while m.pc != 0xFFFFFFF0081BA410 && parkSteps < 1_000_000 { _ = m.step(); parkSteps += 1 }
-        chkEq("parked PC", m.pc, 0xFFFFFFF0081BA410)
-        chkEq("icount at park", m.icount, 17_723_155)
-        chkEq("parked SP", m.sp, 0xFFFFFFF009C03D20)
-        let pcAtPark = m.pc
-        m.run(2_000_000)
-        chk("kernel stays parked (PC unmoved over 2M more)", m.pc == pcAtPark)
-        chkEq("exceptions total", m.exceptions, 1)
-        chk("MMU on at park", m.mmuOn)
-        chkEq("status at park", m.status, "ready")
+        // Parity trajectory, measured from the JS reference (frontiers
+        // 3-20 state, STAGE5-LOG frontier 20) on 2026-11-26: the kernel
+        // executes past 200M instructions with ZERO exceptions delivered.
+        // The checkpoints pin the exact PC at each 50M mark — a porting
+        // divergence anywhere in the first 200M instructions moves at
+        // least one of them. (The pre-sync frontier-3 endpoint — first
+        // exception at 17,723,144, park at 0xFFFFFFF0081BA410 — is what
+        // the stale core used to assert; those days are gone.)
+        m.run(50_000_000)
+        chkEq("icount at 50M", m.icount, 50_000_000)
+        chkEq("PC at 50M", m.pc, 0xFFFFFFF007B87B04)
+        chkEq("SP at 50M", m.sp, 0xFFFFFFF009C03D80)
+        chkEq("exceptions at 50M", m.exceptions, 0)
+        m.run(50_000_000)
+        chkEq("icount at 100M", m.icount, 100_000_000)
+        chkEq("PC at 100M", m.pc, 0xFFFFFFF008090030)
+        chkEq("exceptions at 100M", m.exceptions, 0)
+        m.run(50_000_000)
+        chkEq("icount at 150M", m.icount, 150_000_000)
+        chkEq("PC at 150M", m.pc, 0xFFFFFFF00808FFF8)
+        chkEq("exceptions at 150M", m.exceptions, 0)
+        m.run(50_000_000)
+        chkEq("icount at 200M", m.icount, 200_000_000)
+        chkEq("PC at 200M", m.pc, 0xFFFFFFF007BD164C)
+        chkEq("SP at 200M", m.sp, 0xFFFFFFFE80488BA90)
+        chkEq("X0 at 200M", m.x[0], 0xFFFFFFFE4CD4191A0)
+        chkEq("X1 at 200M", m.x[1], 0x10)
+        chkEq("X7 at 200M", m.x[7], 0x850)
+        chkEq("X8 at 200M", m.x[8], 0x220000)
+        chkEq("X9 at 200M", m.x[9], 0xFFCFFFFF)
+        chkEq("X10 at 200M", m.x[10], 1)
+        chkEq("X11 at 200M", m.x[11], 1)
+        chkEq("X12 at 200M", m.x[12], 0x4A0000)
+        chkEq("exceptions at 200M", m.exceptions, 0)
+        chkEq("status at 200M", m.status, "ready")
+        chk("MMU on at 200M", m.mmuOn)
+        // and it keeps executing cleanly past the gate point
+        m.run(20_000_000)
+        chkEq("icount at 220M", m.icount, 220_000_000)
+        chkEq("exceptions at 220M", m.exceptions, 0)
+        chkEq("status at 220M", m.status, "ready")
         // backdoor smoke on the booted machine
         let regs = core.backdoor("regs")
         chk("backdoor regs answers", regs.contains("X0 = 0x"))
